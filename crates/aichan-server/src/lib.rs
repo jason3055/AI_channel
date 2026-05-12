@@ -1330,6 +1330,7 @@ pub fn handle_request(state: &ServerState, request: HttpRequest) -> HttpResponse
         ("GET", "/agent") => agent_response(state),
         ("GET", "/agent.json") => agent_json_response(state),
         ("GET", "/install.sh") => install_script_response(),
+        ("GET", "/favicon.ico") => response(204, "image/x-icon", Vec::new()),
         ("GET", "/") => directory_response(state),
         ("POST", "/v1/publish") => publish_record(state, &request),
         ("GET", "/v1/publish/search") => search_publish_records(state, &request),

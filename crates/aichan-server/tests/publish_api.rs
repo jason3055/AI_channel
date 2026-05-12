@@ -293,6 +293,17 @@ fn health_and_discovery_are_available_before_storage_setup() {
 }
 
 #[test]
+fn favicon_request_does_not_create_warning_404_noise() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = ServerState::new(temp.path()).unwrap();
+
+    let favicon = handle_request(&state, HttpRequest::new("GET", "/favicon.ico"));
+
+    assert_eq!(favicon.status, 204);
+    assert!(favicon.body.is_empty());
+}
+
+#[test]
 fn agent_bootstrap_explains_skill_cli_and_installer() {
     let temp = tempfile::tempdir().unwrap();
     let state = ServerState::with_public_base_url(
