@@ -67,33 +67,40 @@ jobs:
           fi
 
       - name: Check deploy prerequisites
+        id: prereqs
         if: ${{ steps.readiness.outputs.ready == 'true' }}
         run: |
-          test -n "${PROJECT_ID}"
-          test -n "${REGION}"
-          test -n "${SERVICE}"
-          test -n "${AR_REPO}"
-          test -n "${RUNTIME_SERVICE_ACCOUNT}"
-          test -n "${DEPLOY_SERVICE_ACCOUNT}"
-          test -n "${WIF_PROVIDER}"
+          missing=""
+          for name in PROJECT_ID REGION SERVICE AR_REPO RUNTIME_SERVICE_ACCOUNT DEPLOY_SERVICE_ACCOUNT WIF_PROVIDER; do
+            value="$(eval "printf '%s' \"\${${name}}\"")"
+            if test -z "${value}"; then
+              missing="${missing} ${name}"
+            fi
+          done
+          if test -n "${missing}"; then
+            echo "ready=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::Cloud Run deploy skipped because these repository variables are missing:${missing}"
+          else
+            echo "ready=true" >> "${GITHUB_OUTPUT}"
+          fi
 
       - name: Authenticate to Google Cloud
-        if: ${{ steps.readiness.outputs.ready == 'true' }}
+        if: ${{ steps.readiness.outputs.ready == 'true' && steps.prereqs.outputs.ready == 'true' }}
         uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: ${{ env.WIF_PROVIDER }}
           service_account: ${{ env.DEPLOY_SERVICE_ACCOUNT }}
 
       - name: Set up gcloud
-        if: ${{ steps.readiness.outputs.ready == 'true' }}
+        if: ${{ steps.readiness.outputs.ready == 'true' && steps.prereqs.outputs.ready == 'true' }}
         uses: google-github-actions/setup-gcloud@v3
 
       - name: Build container image
-        if: ${{ steps.readiness.outputs.ready == 'true' }}
+        if: ${{ steps.readiness.outputs.ready == 'true' && steps.prereqs.outputs.ready == 'true' }}
         run: gcloud builds submit --region="${REGION}" --tag="${IMAGE}" .
 
       - name: Deploy to Cloud Run
-        if: ${{ steps.readiness.outputs.ready == 'true' }}
+        if: ${{ steps.readiness.outputs.ready == 'true' && steps.prereqs.outputs.ready == 'true' }}
         id: deploy
         uses: google-github-actions/deploy-cloudrun@v3
         with:
@@ -111,5 +118,5 @@ jobs:
             --max-instances=10
 
       - name: Smoke test health endpoint
-        if: ${{ steps.readiness.outputs.ready == 'true' }}
+        if: ${{ steps.readiness.outputs.ready == 'true' && steps.prereqs.outputs.ready == 'true' }}
         run: curl -fsS "${{ steps.deploy.outputs.url }}/health"

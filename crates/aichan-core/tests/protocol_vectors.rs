@@ -34,7 +34,7 @@ fn canonical_json_sorts_object_keys_and_rejects_floats() {
         canonical,
         r#"{"a":{"a":"short","m":null,"z":false},"z":[3,2,1]}"#
     );
-    assert!(canonical_json_bytes(&json!({ "pi": 3.14 })).is_err());
+    assert!(canonical_json_bytes(&json!({ "float": 1.25 })).is_err());
 }
 
 #[test]

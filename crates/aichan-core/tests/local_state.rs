@@ -2,6 +2,8 @@ use aichan_core::{
     derive_peer_id, AichanConfig, DeviceFile, IdentityFile, LocalStateDir, MemoryFile,
     DEFAULT_BASE_URL,
 };
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 
 #[test]
 fn local_state_paths_point_under_dot_aichan() {
@@ -65,6 +67,18 @@ fn identity_create_or_load_reuses_existing_identity() {
     assert_eq!(first.public_key, second.public_key);
     assert_eq!(first.private_key, second.private_key);
     assert!(!first.private_key_encrypted);
+}
+
+#[test]
+fn identity_exposes_signing_key_that_matches_public_key() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = LocalStateDir::new(temp.path());
+    let identity = IdentityFile::create_or_load(&state).unwrap();
+
+    let signing_key = identity.signing_key().unwrap();
+    let public_key = URL_SAFE_NO_PAD.encode(signing_key.verifying_key().to_bytes());
+
+    assert_eq!(public_key, identity.public_key);
 }
 
 #[test]

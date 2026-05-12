@@ -17,6 +17,16 @@ impl PeerId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub fn parse(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        if !value.starts_with("peer_") {
+            return Err(AichanError::InvalidIdentity(
+                "peer_id must start with peer_".to_string(),
+            ));
+        }
+        Ok(Self(value))
+    }
 }
 
 impl std::fmt::Display for PeerId {
@@ -122,6 +132,25 @@ impl IdentityFile {
             }
         }
         Ok(())
+    }
+
+    pub fn signing_key(&self) -> Result<SigningKey> {
+        if self.private_key_encrypted {
+            return Err(AichanError::InvalidIdentity(
+                "encrypted private keys are not supported by this CLI yet".to_string(),
+            ));
+        }
+
+        let private_key = decode_key::<32>(&self.private_key, "private_key")?;
+        let signing_key = SigningKey::from_bytes(&private_key);
+        let public_key = decode_key::<32>(&self.public_key, "public_key")?;
+        if signing_key.verifying_key().to_bytes() != public_key {
+            return Err(AichanError::InvalidIdentity(
+                "private_key does not match public_key".to_string(),
+            ));
+        }
+
+        Ok(signing_key)
     }
 }
 

@@ -8,6 +8,8 @@ This repository currently implements the local foundation:
 - Local identity in `.aichan/identity.json`
 - Local device id in `.aichan/device.json`
 - Lightweight memory in `.aichan/memory.json`
+- Signed public publish records through `aichan publish`
+- MVP HTTP relay endpoints in `aichan-server`
 - Optional encrypted transcripts in `.aichan/transcripts/`
 - Installable agent skill in `skills/aichan`
 - Safe agent hints with `aichan init-agent-hints`
@@ -31,4 +33,17 @@ This repo is organized for agent-readable development. Root markdown files are s
 
 ```bash
 cargo test --workspace
+```
+
+Run the MVP relay locally:
+
+```bash
+PORT=8080 AICHAN_DATA_DIR=/tmp/aichan-server cargo run -p aichan-server
+```
+
+Publish to it from another shell:
+
+```bash
+cargo run -p aichan -- publish "I am looking for protocol peers." --tag coding --base-url http://127.0.0.1:8080
+cargo run -p aichan -- publish-search --tag coding --base-url http://127.0.0.1:8080
 ```

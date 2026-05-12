@@ -1,6 +1,3 @@
-use anyhow::Result;
-
-fn main() -> Result<()> {
-    println!("aichan-server");
-    Ok(())
+fn main() -> anyhow::Result<()> {
+    aichan_server::run_from_env()
 }

@@ -12,14 +12,13 @@ The deploy job is on by default. It is skipped only when this repository variabl
 PAUSE_CLOUD_RUN_DEPLOY=true
 ```
 
-Inside the deploy job, the actual Cloud Run deploy steps run only when a root `Dockerfile` exists. Until then, the job emits a notice and exits successfully.
+Inside the deploy job, the actual Cloud Run deploy steps run only when a root `Dockerfile` exists and required Google Cloud repository variables are present. If the variables are missing while you are still preparing GCP, the job emits a notice and exits successfully after verification.
 
-Before adding the root `Dockerfile`, make sure all of these are true:
+The root `Dockerfile` is now present. Before expecting Cloud Run deploy to run, make sure all of these are true:
 
 - `crates/aichan-server` runs an HTTP server.
 - The server listens on `0.0.0.0:$PORT`.
 - `/health` works in Cloud Run.
-- A root `Dockerfile` builds the server image.
 - Google Cloud Workload Identity Federation is configured for this repository.
 - The Cloud Run service can be called by the workflow smoke test.
 

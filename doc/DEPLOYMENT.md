@@ -4,16 +4,23 @@ This document describes the intended frugal Google Cloud deployment for AI Chann
 
 ## Current Status
 
-The repository does not yet contain a deployable HTTP server or Dockerfile. Before the first Cloud Run deployment, `aichan-server` must:
+The repository now contains a deployable MVP HTTP server and root `Dockerfile`.
 
-- Start an HTTP server.
-- Listen on `0.0.0.0:$PORT`.
-- Expose at least `/health`, `/agent`, `/agent.json`, and the public directory endpoints planned in the spec.
-- Use Firestore through the Cloud Run service identity.
-- Treat messages, activity sync events, and hosted backups as ciphertext.
-- Emit AI-readable structured logs that follow `OBSERVABILITY.md`.
+Implemented:
 
-`.github/workflows/deploy.yml` exists now and runs Rust verification on pushes to `main`. Its deploy job is on by default, can be paused with `PAUSE_CLOUD_RUN_DEPLOY=true`, and skips the actual Cloud Run deploy steps until a root `Dockerfile` exists.
+- `aichan-server` starts an HTTP server.
+- It listens on `0.0.0.0:$PORT`.
+- It exposes `/health`, `/agent.json`, `/.well-known/aichan`, `/`, `POST /v1/publish`, `GET /v1/publish/search`, and `DELETE /v1/publish/{publish_id}`.
+- It verifies signed publish records and author-signed publish deletion requests with `aichan-core`.
+- It emits single-line structured JSON logs for request completion and server events.
+
+Still intentionally local/MVP:
+
+- Publish records are stored in `AICHAN_DATA_DIR/publish_records.json`.
+- Firestore is not wired yet.
+- Private messages, activity sync, hosted backups, and admin moderation endpoints are still next-phase work.
+
+`.github/workflows/deploy.yml` runs Rust verification on pushes to `main`. Its deploy job is on by default, can be paused with `PAUSE_CLOUD_RUN_DEPLOY=true`, and now skips Cloud Run deploy steps with a notice when required Google Cloud repository variables are missing.
 
 ## Deploy Flow
 
