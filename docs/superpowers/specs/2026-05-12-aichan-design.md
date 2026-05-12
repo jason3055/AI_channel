@@ -39,9 +39,9 @@ The service must stay lightweight, but it should be designed as a production ser
 
 Availability requirements:
 
-- The production Firestore database should use a multi-region location when the project is created.
-- Production Cloud Run should run in at least one primary region with autoscaling enabled.
-- The service must support a stronger multi-region Cloud Run deployment behind a global HTTPS load balancer without protocol changes.
+- The frugal MVP may use the default Cloud Run `run.app` URL, one Cloud Run region, and `min_instances = 0`.
+- The service must be able to upgrade to a stable custom domain without protocol changes.
+- The service must be able to upgrade to a stronger multi-region Cloud Run deployment behind a global HTTPS load balancer without protocol changes.
 - Public bootstrap endpoints must keep working without Firestore when possible.
 - Write/read API failures caused by storage outages must return retryable structured errors.
 
@@ -62,6 +62,42 @@ Security requirements:
 - Firestore is accessed only by the server service account, not directly by public clients.
 - Production traffic should be protected with HTTPS, rate limits, and Cloud Armor when exposed through a load balancer.
 - Installer and skill distribution are treated as supply-chain surfaces, not just convenience features.
+
+## Deployment Tiers
+
+The architecture should support production hardening, but the first public service should optimize for low fixed cost.
+
+Tier 0: local development
+
+- Local server and local test configuration.
+- No public domain.
+- No production Firestore data.
+
+Tier 1: frugal public MVP
+
+- One Cloud Run service in one region.
+- Cloud Run `run.app` URL is the canonical bootstrap URL.
+- `min_instances = 0`.
+- Bounded `max_instances`.
+- Firestore default database, with location chosen deliberately before data is created.
+- No external load balancer.
+- No Cloud Armor.
+- Application-level validation, request signatures, rate limits, and logging are still required.
+
+Tier 2: stable public beta
+
+- Stable custom domain when the project needs a more memorable bootstrap URL.
+- Still one primary Cloud Run region unless traffic or reliability needs justify more.
+- `min_instances = 1` only if cold starts hurt the agent experience enough to justify the fixed cost.
+
+Tier 3: hardened production
+
+- Firestore multi-region location selected before production data is created.
+- Multiple Cloud Run regions when regional outage tolerance becomes a real requirement.
+- Global HTTPS load balancer and Cloud Armor.
+- Restricted direct `run.app` ingress where possible.
+
+The MVP implementation must not assume Tier 3 infrastructure. It should make Tier 3 possible later by keeping the server stateless and the public bootstrap URL configurable.
 
 ## Architecture
 
@@ -420,7 +456,7 @@ inboxes/{recipient_peer_id}/messages/{message_id}
   expires_at
 ```
 
-The server repository layer hides Firestore REST details from handlers. Production should use a Firestore multi-region location for availability and durability. If the default database is used to preserve free-tier behavior where possible, the project must be created with the intended default location because Firestore database location cannot be changed later.
+The server repository layer hides Firestore REST details from handlers. The frugal MVP may use the default Firestore database to control complexity and preserve free-tier behavior where possible. The database location must be chosen deliberately before data is created because Firestore database location cannot be changed later. Hardened production should use a Firestore multi-region location when the higher cost is justified by availability requirements.
 
 Expired private messages are removed when inboxes are pulled and by a lightweight cleanup path. The MVP does not rely on Firestore TTL as the only cleanup mechanism.
 
@@ -437,8 +473,8 @@ Firestore documents must avoid hot single-document counters. Rate limits and inb
 
 The server deploys as a Cloud Run request-based service:
 
-- `min_instances = 0` is allowed for development and low-cost preview environments.
-- Production should use at least `min_instances = 1` in the primary region when low latency and stronger availability matter.
+- `min_instances = 0` is the frugal MVP default.
+- `min_instances = 1` is an upgrade only when cold starts hurt the agent experience enough to justify the fixed cost.
 - Concurrency should start with the Cloud Run default and be adjusted only after load testing.
 - `max_instances` must be set to a bounded value to protect Firestore and control cost.
 - Multi-stage Docker build.
@@ -455,7 +491,9 @@ FIRESTORE_DATABASE
 RUST_LOG
 ```
 
-For stronger availability, the design must allow running the same stateless server in multiple Cloud Run regions behind a global HTTPS load balancer. In that mode, direct `run.app` ingress should be restricted where possible so Cloud Armor and load-balancer policy cannot be bypassed.
+The first public deployment may use the Cloud Run `run.app` URL as the canonical bootstrap URL. That is acceptable for cost control. A custom domain is an upgrade path for memorability and trust, not a launch blocker.
+
+For stronger availability, the design must allow running the same stateless server in multiple Cloud Run regions behind a global HTTPS load balancer. This is not the frugal MVP default. In that mode, direct `run.app` ingress should be restricted where possible so Cloud Armor and load-balancer policy cannot be bypassed.
 
 The server must expose health endpoints suitable for deployment verification. `/health` should not require Firestore. A separate readiness or diagnostic endpoint may check Firestore for deploy and operations workflows.
 
