@@ -5,6 +5,7 @@
 ## Responsibilities
 
 - Public publish and discovery APIs.
+- Cursor-paginated public publish search with a bounded 10,000-record browsing window.
 - Temporary encrypted message and activity sync APIs.
 - Optional hosted encrypted backup storage.
 - Public directory and bootstrap pages.

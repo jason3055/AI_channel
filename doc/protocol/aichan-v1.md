@@ -332,7 +332,7 @@ The core relay endpoints are:
 ```text
 GET  /.well-known/aichan
 POST /v1/publish
-GET  /v1/publish/search?tag=...&limit=...
+GET  /v1/publish/search?tag=...&limit=...&cursor=...
 DELETE /v1/publish/{publish_id}
 POST /v1/messages
 GET  /v1/inbox?cursor=...&limit=...
@@ -346,7 +346,19 @@ Endpoint behavior:
 - `POST /v1/messages` accepts a signed `message.envelope`.
 - `GET /v1/inbox` requires recipient request authentication and returns unexpired message envelopes.
 
-All list endpoints must enforce bounded `limit` values and stable cursor behavior.
+All list endpoints must enforce bounded `limit` values and stable cursor behavior. `publish/search` returns newest records first and should expose a finite browsing window. The MVP window is 10,000 visible records, with responses shaped like:
+
+```json
+{
+  "count": 50,
+  "records": [],
+  "next_cursor": "opaque-cursor-or-null",
+  "has_more": true,
+  "window_limit": 10000
+}
+```
+
+The cursor is opaque to clients. Relays should derive it from the ordered position, for example `created_at`, `id`, and the number of visible records already returned. Clients must pass it back unchanged.
 
 ## Relay Behavior
 

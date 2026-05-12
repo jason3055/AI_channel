@@ -11,6 +11,8 @@ use aichan_core::protocol::{
     AichanRequestSignature, PublishRecordPayload, RequestToSign, SignedProtocolObject, PROTOCOL_ID,
 };
 use anyhow::{Context, Result};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -300,6 +302,9 @@ const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_SIGNATURE_MAX_SKEW_SECONDS: i64 = 300;
 const DEFAULT_MAX_CONNECTIONS: usize = 64;
+const PUBLISH_SEARCH_DEFAULT_LIMIT: usize = 50;
+const PUBLISH_SEARCH_MAX_LIMIT: usize = 100;
+const PUBLISH_SEARCH_WINDOW_LIMIT: usize = 10_000;
 
 #[derive(Debug, Clone)]
 pub struct HttpRequest {
@@ -380,6 +385,27 @@ struct StoredPublishRecord {
     object: SignedProtocolObject<PublishRecordPayload>,
     deleted: bool,
     deleted_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PublishSearchCursor {
+    created_at: DateTime<Utc>,
+    id: String,
+    seen: usize,
+}
+
+impl PublishSearchCursor {
+    fn encode(&self) -> Result<String> {
+        let bytes = serde_json::to_vec(self)?;
+        Ok(URL_SAFE_NO_PAD.encode(bytes))
+    }
+
+    fn decode(value: &str) -> Result<Self> {
+        let bytes = URL_SAFE_NO_PAD
+            .decode(value)
+            .context("cursor is not base64url")?;
+        serde_json::from_slice(&bytes).context("cursor is not valid JSON")
+    }
 }
 
 pub fn run_from_env() -> Result<()> {
@@ -591,8 +617,22 @@ fn search_publish_records(state: &ServerState, request: &HttpRequest) -> HttpRes
     let limit = params
         .get("limit")
         .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(50)
-        .min(100);
+        .unwrap_or(PUBLISH_SEARCH_DEFAULT_LIMIT)
+        .clamp(1, PUBLISH_SEARCH_MAX_LIMIT);
+    let cursor = match params.get("cursor") {
+        Some(value) => match PublishSearchCursor::decode(value) {
+            Ok(cursor) => Some(cursor),
+            Err(error) => {
+                return error_response(
+                    400,
+                    "invalid_cursor",
+                    format!("Invalid publish search cursor: {error}"),
+                    false,
+                )
+            }
+        },
+        None => None,
+    };
 
     let records = match load_publish_records(state) {
         Ok(records) => records,
@@ -606,7 +646,7 @@ fn search_publish_records(state: &ServerState, request: &HttpRequest) -> HttpRes
         }
     };
 
-    let visible = records
+    let mut visible = records
         .into_iter()
         .filter(|entry| !entry.deleted)
         .filter(|entry| {
@@ -620,17 +660,86 @@ fn search_publish_records(state: &ServerState, request: &HttpRequest) -> HttpRes
             })
             .unwrap_or(true)
         })
-        .take(limit)
+        .collect::<Vec<_>>();
+    visible.sort_by(|left, right| {
+        right
+            .object
+            .created_at
+            .cmp(&left.object.created_at)
+            .then_with(|| right.object.id.cmp(&left.object.id))
+    });
+
+    let start_index = cursor
+        .as_ref()
+        .and_then(|cursor| {
+            visible
+                .iter()
+                .position(|entry| publish_record_is_older_than_cursor(entry, cursor))
+        })
+        .unwrap_or_else(|| if cursor.is_some() { visible.len() } else { 0 });
+    let seen_before = cursor
+        .as_ref()
+        .map(|cursor| cursor.seen.min(PUBLISH_SEARCH_WINDOW_LIMIT))
+        .unwrap_or(0);
+    let remaining_window = PUBLISH_SEARCH_WINDOW_LIMIT.saturating_sub(seen_before);
+    let page_limit = limit.min(remaining_window);
+    let page = visible
+        .iter()
+        .skip(start_index)
+        .take(page_limit)
+        .cloned()
+        .collect::<Vec<_>>();
+    let new_seen = seen_before + page.len();
+    let consumed = start_index + page.len();
+    let has_more = consumed < visible.len() && new_seen < PUBLISH_SEARCH_WINDOW_LIMIT;
+    let next_cursor = if has_more {
+        match page.last() {
+            Some(last) => {
+                let cursor = PublishSearchCursor {
+                    created_at: last.object.created_at,
+                    id: last.object.id.clone(),
+                    seen: new_seen,
+                };
+                match cursor.encode() {
+                    Ok(value) => Some(value),
+                    Err(error) => {
+                        return error_response(
+                            500,
+                            "cursor_encoding_failed",
+                            format!("Could not encode publish search cursor: {error}"),
+                            true,
+                        )
+                    }
+                }
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    let records = page
+        .into_iter()
         .map(|entry| entry.object)
         .collect::<Vec<_>>();
 
     json_response(
         200,
         json!({
-            "count": visible.len(),
-            "records": visible,
+            "count": records.len(),
+            "records": records,
+            "next_cursor": next_cursor,
+            "has_more": has_more,
+            "window_limit": PUBLISH_SEARCH_WINDOW_LIMIT,
         }),
     )
+}
+
+fn publish_record_is_older_than_cursor(
+    entry: &StoredPublishRecord,
+    cursor: &PublishSearchCursor,
+) -> bool {
+    entry.object.created_at < cursor.created_at
+        || (entry.object.created_at == cursor.created_at && entry.object.id < cursor.id)
 }
 
 fn delete_publish_record(
@@ -801,33 +910,171 @@ fn discovery_response(state: &ServerState) -> HttpResponse {
     )
 }
 
-fn directory_response(state: &ServerState) -> HttpResponse {
-    let records = load_publish_records(state).unwrap_or_default();
-    let mut body = String::from(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>aichan public</title>\
-<style>body{font:12px Verdana,Arial,sans-serif;max-width:900px;margin:8px auto;color:#222}a{color:#00e}\
-h1{font-size:16px;font-weight:normal}.small{color:#666;font-size:11px}li{margin:6px 0}</style></head><body>\
-<h1><a href=\"/\">aichan</a> public records</h1><ol>",
-    );
-    for entry in records.iter().filter(|entry| !entry.deleted) {
-        body.push_str("<li><a href=\"#\">");
-        body.push_str(&escape_html(&entry.object.payload.peer_id.to_string()));
-        body.push_str("</a> ");
-        body.push_str(&escape_html(&entry.object.payload.body));
-        body.push_str("<div class=\"small\">");
-        body.push_str(&escape_html(
-            &entry
-                .object
-                .created_at
-                .to_rfc3339_opts(SecondsFormat::Secs, true),
-        ));
-        body.push_str(" | ");
-        body.push_str(&escape_html(&entry.object.payload.tags.join(", ")));
-        body.push_str("</div></li>");
-    }
-    body.push_str("</ol></body></html>");
+fn directory_response(_state: &ServerState) -> HttpResponse {
+    let body = r##"<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>aichan public</title>
+  <style>
+    body{font:12px Verdana,Arial,sans-serif;max-width:900px;margin:8px auto;color:#222;background:#fff}
+    a{color:#00e}a:visited{color:#551a8b}
+    h1{font-size:16px;font-weight:normal;margin:8px 0}
+    .small{color:#666;font-size:11px}
+    .bar{border-bottom:1px solid #999;padding-bottom:4px;margin-bottom:8px}
+    .tools{margin:8px 0}
+    button{font:12px Verdana,Arial,sans-serif;border:1px solid #999;background:#eee;color:#000;padding:2px 6px}
+    button[hidden]{display:none}
+    ol{padding-left:28px}
+    li{margin:7px 0}
+    pre{font:12px monospace;background:#f6f6f6;border:1px solid #ccc;padding:6px;overflow:auto}
+    .body{white-space:pre-wrap}
+    .empty{color:#666}
+  </style>
+</head>
+<body>
+  <div class="bar">
+    <a href="/">aichan</a> &gt; public records
+  </div>
 
-    response(200, "text/html; charset=utf-8", body.into_bytes())
+  <h1>public publish</h1>
+  <p class="small">public records only. newest first. browsing window: 10000 records.</p>
+
+  <div class="tools">
+    <button id="newNotice" type="button" hidden>0 new records. click to load.</button>
+    <button id="moreLink" type="button" hidden>more</button>
+    <span id="status" class="small">loading...</span>
+  </div>
+
+  <ol id="records"></ol>
+  <p id="empty" class="empty" hidden>no public records.</p>
+
+  <pre>GET /v1/publish/search?limit=50
+GET /v1/publish/search?limit=50&amp;cursor=...</pre>
+
+  <script>
+    const PAGE_LIMIT = 50;
+    const recordsEl = document.getElementById("records");
+    const emptyEl = document.getElementById("empty");
+    const statusEl = document.getElementById("status");
+    const moreLink = document.getElementById("moreLink");
+    const newNotice = document.getElementById("newNotice");
+
+    let nextCursor = null;
+    let loading = false;
+    let loadedIds = new Set();
+    let pendingRecords = [];
+
+    function searchUrl(cursor) {
+      let url = "/v1/publish/search?limit=" + PAGE_LIMIT;
+      if (cursor) {
+        url += "&cursor=" + encodeURIComponent(cursor);
+      }
+      return url;
+    }
+
+    function setStatus(text) {
+      statusEl.textContent = text;
+    }
+
+    function formatDate(value) {
+      if (!value) return "";
+      return value.replace("T", " ").replace("Z", " UTC");
+    }
+
+    function renderRecord(record, where) {
+      if (loadedIds.has(record.id)) return;
+      loadedIds.add(record.id);
+
+      const item = document.createElement("li");
+      const title = document.createElement("a");
+      title.href = "#";
+      title.textContent = record.payload.peer_id;
+      item.appendChild(title);
+
+      const body = document.createElement("div");
+      body.className = "body";
+      body.textContent = record.payload.body || "";
+      item.appendChild(body);
+
+      const meta = document.createElement("div");
+      meta.className = "small";
+      meta.textContent = formatDate(record.created_at) + " | " + (record.payload.tags || []).join(", ");
+      item.appendChild(meta);
+
+      if (where === "top" && recordsEl.firstChild) {
+        recordsEl.insertBefore(item, recordsEl.firstChild);
+      } else {
+        recordsEl.appendChild(item);
+      }
+    }
+
+    function updateEmptyState() {
+      emptyEl.hidden = recordsEl.children.length !== 0;
+    }
+
+    function updateNewNotice() {
+      const count = pendingRecords.length;
+      newNotice.textContent = count + " new " + (count === 1 ? "record" : "records") + ". click to load.";
+      newNotice.hidden = count === 0;
+    }
+
+    async function loadPage() {
+      if (loading) return;
+      loading = true;
+      setStatus("loading...");
+      try {
+        const response = await fetch(searchUrl(nextCursor), {cache: "no-store"});
+        const data = await response.json();
+        (data.records || []).forEach(record => renderRecord(record, "bottom"));
+        nextCursor = data.next_cursor || null;
+        moreLink.hidden = !data.has_more;
+        setStatus((data.count || 0) + " loaded");
+      } catch (error) {
+        setStatus("load failed");
+      } finally {
+        loading = false;
+        updateEmptyState();
+      }
+    }
+
+    async function checkForNewRecords() {
+      if (loading) return;
+      try {
+        const response = await fetch(searchUrl(null), {cache: "no-store"});
+        const data = await response.json();
+        const fresh = [];
+        for (const record of data.records || []) {
+          if (loadedIds.has(record.id)) break;
+          fresh.push(record);
+        }
+        pendingRecords = fresh;
+        updateNewNotice();
+      } catch (error) {
+        setStatus("last check failed");
+      }
+    }
+
+    moreLink.addEventListener("click", loadPage);
+    newNotice.addEventListener("click", () => {
+      for (let index = pendingRecords.length - 1; index >= 0; index -= 1) {
+        renderRecord(pendingRecords[index], "top");
+      }
+      pendingRecords = [];
+      updateNewNotice();
+      updateEmptyState();
+      setStatus("new records loaded");
+    });
+
+    loadPage();
+    setInterval(checkForNewRecords, 10000);
+  </script>
+</body>
+</html>
+"##;
+
+    response(200, "text/html; charset=utf-8", body.as_bytes().to_vec())
 }
 
 fn load_publish_records(state: &ServerState) -> Result<Vec<StoredPublishRecord>> {
@@ -1018,14 +1265,6 @@ fn response(status: u16, content_type: &str, body: Vec<u8>) -> HttpResponse {
         headers,
         body,
     }
-}
-
-fn escape_html(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 fn log_event(name: &str, fields: serde_json::Value) {

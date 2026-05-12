@@ -143,6 +143,31 @@ hosted_backups         encrypted backup generations
 idempotency_keys       bounded retry records with expires_at
 ```
 
+### Publish Search Query Shape
+
+The HTTP API already exposes cursor pagination for `GET /v1/publish/search`. The file-store MVP sorts visible records by `created_at desc, id desc`, caps each page at 100 records, and caps the public browsing window at 10,000 visible records.
+
+The Firestore repository should preserve that API shape:
+
+```text
+collection: publish_records
+filters:
+  deleted == false
+  hidden == false
+  tags array-contains <tag>       optional
+order:
+  created_at desc
+  id desc
+cursor:
+  startAfter(last_created_at, last_id)
+page size:
+  min(request.limit, 100)
+window:
+  stop after 10000 visible records from the first page
+```
+
+Create composite indexes before production traffic for the tag-filtered and unfiltered directory queries. The public page should call the Cloud Run API only; it should not query Firestore directly from browser code.
+
 ### TTL Policies
 
 Use Firestore TTL on temporary private collections. TTL fields must be Firestore timestamp fields.

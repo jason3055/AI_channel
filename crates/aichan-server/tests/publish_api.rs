@@ -18,10 +18,21 @@ fn signed_publish_with(
     publish_id: &str,
     body: &str,
 ) -> (SigningKey, SignedProtocolObject<PublishRecordPayload>) {
+    signed_publish_at(
+        publish_id,
+        body,
+        Utc.with_ymd_and_hms(2026, 5, 12, 1, 2, 3).unwrap(),
+    )
+}
+
+fn signed_publish_at(
+    publish_id: &str,
+    body: &str,
+    created_at: chrono::DateTime<Utc>,
+) -> (SigningKey, SignedProtocolObject<PublishRecordPayload>) {
     let signing_key = SigningKey::from_bytes(&[3_u8; 32]);
     let public_key = URL_SAFE_NO_PAD.encode(signing_key.verifying_key().to_bytes());
     let peer_id = derive_peer_id(&signing_key.verifying_key().to_bytes());
-    let created_at = Utc.with_ymd_and_hms(2026, 5, 12, 1, 2, 3).unwrap();
     let payload = PublishRecordPayload {
         peer_id,
         public_key,
@@ -110,6 +121,73 @@ fn publish_search_and_author_delete_round_trip() {
 
     assert_eq!(after_delete.status, 200);
     assert!(!after_delete.body_text().contains("hello public relay"));
+}
+
+#[test]
+fn publish_search_returns_recent_records_with_cursor_pages() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = ServerState::new(temp.path()).unwrap();
+
+    for (id, body, minute) in [
+        ("pub_page_001", "oldest public note", 1),
+        ("pub_page_002", "middle public note", 2),
+        ("pub_page_003", "newest public note", 3),
+    ] {
+        let (_, publish) = signed_publish_at(
+            id,
+            body,
+            Utc.with_ymd_and_hms(2026, 5, 12, 1, minute, 0).unwrap(),
+        );
+        let create = handle_request(
+            &state,
+            HttpRequest::new("POST", "/v1/publish")
+                .with_json_body(serde_json::to_vec(&publish).unwrap()),
+        );
+        assert_eq!(create.status, 201);
+    }
+
+    let first = handle_request(
+        &state,
+        HttpRequest::new("GET", "/v1/publish/search?tag=coding&limit=2"),
+    );
+    assert_eq!(first.status, 200);
+    let first_json: serde_json::Value = serde_json::from_slice(&first.body).unwrap();
+    assert_eq!(first_json["count"], 2);
+    assert_eq!(first_json["window_limit"], 10_000);
+    assert_eq!(first_json["has_more"], true);
+    assert_eq!(first_json["records"][0]["id"], "pub_page_003");
+    assert_eq!(first_json["records"][1]["id"], "pub_page_002");
+    let cursor = first_json["next_cursor"].as_str().unwrap();
+    assert!(!cursor.is_empty());
+
+    let second = handle_request(
+        &state,
+        HttpRequest::new(
+            "GET",
+            format!("/v1/publish/search?tag=coding&limit=2&cursor={cursor}"),
+        ),
+    );
+    assert_eq!(second.status, 200);
+    let second_json: serde_json::Value = serde_json::from_slice(&second.body).unwrap();
+    assert_eq!(second_json["count"], 1);
+    assert_eq!(second_json["has_more"], false);
+    assert!(second_json["next_cursor"].is_null());
+    assert_eq!(second_json["records"][0]["id"], "pub_page_001");
+}
+
+#[test]
+fn directory_page_loads_publish_api_pages_and_new_record_notice() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = ServerState::new(temp.path()).unwrap();
+
+    let page = handle_request(&state, HttpRequest::new("GET", "/"));
+
+    assert_eq!(page.status, 200);
+    let html = page.body_text();
+    assert!(html.contains("/v1/publish/search?limit="));
+    assert!(html.contains("id=\"moreLink\""));
+    assert!(html.contains("id=\"newNotice\""));
+    assert!(html.contains("setInterval(checkForNewRecords"));
 }
 
 #[test]
