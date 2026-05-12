@@ -30,7 +30,7 @@ push to main
   -> cargo test --workspace
   -> cargo clippy --workspace --all-targets -- -D warnings
   -> Google OIDC / Workload Identity Federation
-  -> Cloud Build builds the Docker image
+  -> GitHub runner builds the Docker image
   -> Artifact Registry stores the image
   -> Cloud Run deploys the image
   -> /health smoke test
@@ -114,7 +114,7 @@ Examples that should not be stored in GitHub:
 Use two service accounts:
 
 - Runtime service account: attached to Cloud Run and allowed to read/write Firestore.
-- Deploy service account: impersonated by GitHub Actions and allowed to build/deploy.
+- Deploy service account: impersonated by GitHub Actions and allowed to push images to Artifact Registry and deploy Cloud Run.
 
 This keeps runtime permissions smaller than deploy permissions.
 
@@ -124,6 +124,7 @@ This keeps runtime permissions smaller than deploy permissions.
 - The deploy job checks for a root `Dockerfile` before building. Without a Dockerfile, deploy steps are skipped successfully.
 - The workflow does not grant public access to the Cloud Run service. Configure public access once in Google Cloud, then let deployments preserve it.
 - The workflow uses commit SHA image tags so each deploy points to a specific Git revision.
+- The workflow builds the Docker image on the GitHub runner and pushes it to Artifact Registry. It does not require Cloud Build or the Cloud Build staging bucket.
 - The workflow deploys the MVP with `min-instances=0`, `max-instances=3`, `timeout=15s`, and conservative application rate-limit environment variables.
 - Cloud Run deploys with `AICHAN_PUBLISH_STORE=firestore`, `AICHAN_FIRESTORE_PROJECT_ID`, and `AICHAN_FIRESTORE_DATABASE=(default)` so public publish records survive instance restarts.
 - The smoke test uses unauthenticated `curl` against `/health`. If the service is private later, replace it with an authenticated Cloud Run request.
@@ -135,6 +136,6 @@ If the deploy job fails:
 1. Check whether the verify job failed first.
 2. Check missing GitHub variables in `Check deploy prerequisites`.
 3. Check Workload Identity Federation errors in `Authenticate to Google Cloud`.
-4. Check Cloud Build logs for Docker or compilation failures.
+4. Check the `docker build` and `docker push` steps for Docker, Rust compilation, or Artifact Registry permission failures.
 5. Check Cloud Run rollout errors.
 6. After a successful rollout, check `/health` and then the log queries in `OBSERVABILITY.md`.

@@ -20,7 +20,7 @@ These notes summarize official deployment references used by `doc/DEPLOYMENT.md`
 - [Firestore SDKs and client libraries](https://firebase.google.com/docs/firestore/client/libraries): server client libraries use privileged environments and are not evaluated against Security Rules.
 - [Firestore REST `documents:runQuery`](https://firebase.google.com/docs/firestore/reference/rest/v1/projects.databases.documents/runQuery): runs structured queries against Firestore documents.
 - [Firestore REST `documents:commit`](https://cloud.google.com/firestore/docs/reference/rest/v1/projects.databases.documents/commit): atomically applies document writes and preconditions.
-- [Build and push a Docker image with Cloud Build](https://cloud.google.com/build/docs/build-push-docker-image): build a Dockerfile and push the resulting image to Artifact Registry.
+- [Artifact Registry Docker authentication](https://cloud.google.com/artifact-registry/docs/docker/authentication): configure Docker to push images to Artifact Registry.
 - [Deploying container images to Cloud Run](https://cloud.google.com/run/docs/deploying): deploy an image with `gcloud run deploy SERVICE --image IMAGE_URL`.
 - [Allowing public access to Cloud Run](https://cloud.google.com/run/docs/authenticating/public): public services can disable Invoker IAM check or grant unauthenticated invoker access.
 - [Firebase Hosting rewrites to Cloud Run](https://firebase.google.com/docs/hosting/cloud-run): Hosting can route HTTPS requests to Cloud Run services with rewrites.

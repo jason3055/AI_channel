@@ -32,7 +32,7 @@ Primary path after setup:
 push to main
   -> GitHub Actions verify job
   -> Google Workload Identity Federation
-  -> Cloud Build builds the Docker image
+  -> GitHub Actions builds the Docker image
   -> Artifact Registry stores the image
   -> Cloud Run deploys the image
   -> /health smoke test
@@ -112,7 +112,6 @@ gcloud services enable \
   run.googleapis.com \
   firestore.googleapis.com \
   artifactregistry.googleapis.com \
-  cloudbuild.googleapis.com \
   iam.googleapis.com \
   iamcredentials.googleapis.com \
   secretmanager.googleapis.com
@@ -267,10 +266,6 @@ gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
 
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
   --member="serviceAccount:${DEPLOY_SERVICE_ACCOUNT}" \
-  --role="roles/cloudbuild.builds.editor"
-
-gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
-  --member="serviceAccount:${DEPLOY_SERVICE_ACCOUNT}" \
   --role="roles/logging.viewer"
 
 gcloud iam service-accounts add-iam-policy-binding "${RUNTIME_SERVICE_ACCOUNT}" \
@@ -371,15 +366,14 @@ gcloud artifacts repositories create "${AR_REPO}" \
   --description="AI Channel container images"
 ```
 
-GitHub Actions will build and push after a Dockerfile exists. Manual fallback:
+GitHub Actions builds on the GitHub runner and pushes after a Dockerfile exists. Manual fallback from a machine with Docker:
 
 ```bash
 export IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${SERVICE}:$(git rev-parse --short HEAD)"
 
-gcloud builds submit \
-  --region="${REGION}" \
-  --tag="${IMAGE}" \
-  .
+gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+docker build --tag "${IMAGE}" .
+docker push "${IMAGE}"
 ```
 
 ## GitHub Actions Deploy
@@ -542,7 +536,7 @@ The first public MVP can use the `run.app` URL. For a stable public beta, prefer
 - Firebase: server Firestore libraries bypass Security Rules and use IAM.
 - Firestore REST: `documents:runQuery` runs structured queries.
 - Firestore REST: `documents:commit` atomically applies writes and preconditions.
-- Google Cloud: Cloud Build can build a Dockerfile and push the image to Artifact Registry.
+- GitHub Actions: Docker can build the root Dockerfile and push the image to Artifact Registry through Workload Identity Federation.
 - Google Cloud: Cloud Run public access can use disabled Invoker IAM check or unauthenticated invoker binding.
 - Firebase: Hosting can rewrite requests to Cloud Run.
 - Google Cloud: Cloud Run writes request, container, and system logs to Cloud Logging.

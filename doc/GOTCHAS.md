@@ -2,11 +2,11 @@
 
 This document captures pitfalls that are easy for future agent sessions to miss. Keep it short, practical, and updated whenever a review finds the same mistake twice.
 
-## The Server Is Not Deployable Yet
+## Keep Deploy Readiness Honest
 
-`crates/aichan-server` is currently a compiling placeholder. A Cloud Run service must run an HTTP server and listen on `0.0.0.0:$PORT`; the current binary prints and exits. Do not treat a successful Rust build as a deployable Cloud Run service until the HTTP server, health endpoint, and container packaging exist.
+`crates/aichan-server` is now a deployable MVP HTTP server. A Cloud Run service must keep listening on `0.0.0.0:$PORT`, and `/health` must keep working after any server or Dockerfile change.
 
-The GitHub Actions deploy job is on by default but skips actual deployment until a root `Dockerfile` exists. Do not add the Dockerfile until the HTTP server, Cloud Run service, GitHub variables, and Workload Identity Federation setup are ready. Use `PAUSE_CLOUD_RUN_DEPLOY=true` to stop main-branch deployments temporarily.
+The GitHub Actions deploy job is on by default and can be paused with `PAUSE_CLOUD_RUN_DEPLOY=true`. It builds the Docker image on the GitHub runner and pushes to Artifact Registry; it should not require Cloud Build staging bucket permissions.
 
 ## Firebase Means Firestore For This Project
 

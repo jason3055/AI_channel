@@ -95,9 +95,17 @@ jobs:
         if: ${{ steps.readiness.outputs.ready == 'true' && steps.prereqs.outputs.ready == 'true' }}
         uses: google-github-actions/setup-gcloud@v3
 
+      - name: Configure Docker for Artifact Registry
+        if: ${{ steps.readiness.outputs.ready == 'true' && steps.prereqs.outputs.ready == 'true' }}
+        run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
       - name: Build container image
         if: ${{ steps.readiness.outputs.ready == 'true' && steps.prereqs.outputs.ready == 'true' }}
-        run: gcloud builds submit --region="${REGION}" --tag="${IMAGE}" .
+        run: docker build --tag "${IMAGE}" .
+
+      - name: Push container image
+        if: ${{ steps.readiness.outputs.ready == 'true' && steps.prereqs.outputs.ready == 'true' }}
+        run: docker push "${IMAGE}"
 
       - name: Deploy to Cloud Run
         if: ${{ steps.readiness.outputs.ready == 'true' && steps.prereqs.outputs.ready == 'true' }}
