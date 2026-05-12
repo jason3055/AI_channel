@@ -63,7 +63,15 @@ impl IdentityFile {
             private_key_encrypted: false,
             created_at: Utc::now(),
         };
-        identity.write_to(&path)?;
+        match identity.write_to(&path) {
+            Ok(()) => {}
+            Err(AichanError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::AlreadyExists =>
+            {
+                return Self::read_from(&path);
+            }
+            Err(error) => return Err(error),
+        }
         Ok(identity)
     }
 
@@ -79,8 +87,7 @@ impl IdentityFile {
     fn write_to(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
         let bytes = serde_json::to_vec_pretty(self).map_err(|source| json_error(path, source))?;
-        std::fs::write(path, bytes).map_err(|source| io_error(path, source))?;
-        set_private_file_permissions(path)?;
+        write_new_identity_file(path, &bytes)?;
         Ok(())
     }
 
@@ -96,19 +103,61 @@ impl IdentityFile {
                 "peer_id must start with peer_".to_string(),
             ));
         }
+        let public_key = decode_key::<32>(&self.public_key, "public_key")?;
+        let private_key = decode_key::<32>(&self.private_key, "private_key")?;
+        VerifyingKey::from_bytes(&public_key).map_err(|source| {
+            AichanError::InvalidIdentity(format!("invalid public_key: {source}"))
+        })?;
+        if self.peer_id != derive_peer_id(&public_key) {
+            return Err(AichanError::InvalidIdentity(
+                "peer_id does not match public_key".to_string(),
+            ));
+        }
+        if !self.private_key_encrypted {
+            let signing_key = SigningKey::from_bytes(&private_key);
+            if signing_key.verifying_key().to_bytes() != public_key {
+                return Err(AichanError::InvalidIdentity(
+                    "private_key does not match public_key".to_string(),
+                ));
+            }
+        }
         Ok(())
     }
 }
 
-#[cfg(unix)]
-fn set_private_file_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
+fn decode_key<const N: usize>(encoded: &str, field: &str) -> Result<[u8; N]> {
+    let bytes = URL_SAFE_NO_PAD.decode(encoded).map_err(|source| {
+        AichanError::InvalidIdentity(format!("invalid {field} encoding: {source}"))
+    })?;
+    bytes.try_into().map_err(|bytes: Vec<u8>| {
+        AichanError::InvalidIdentity(format!("{field} must be {N} bytes, got {}", bytes.len()))
+    })
+}
 
-    let permissions = std::fs::Permissions::from_mode(0o600);
-    std::fs::set_permissions(path, permissions).map_err(|source| io_error(path, source))
+#[cfg(unix)]
+fn write_new_identity_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|source| io_error(path, source))?;
+    file.write_all(bytes)
+        .map_err(|source| io_error(path, source))
 }
 
 #[cfg(not(unix))]
-fn set_private_file_permissions(_path: &Path) -> Result<()> {
-    Ok(())
+fn write_new_identity_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|source| io_error(path, source))?;
+    file.write_all(bytes)
+        .map_err(|source| io_error(path, source))
 }

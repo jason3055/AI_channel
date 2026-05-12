@@ -59,6 +59,61 @@ fn identity_create_or_load_reuses_existing_identity() {
     assert!(!first.private_key_encrypted);
 }
 
+#[test]
+fn identity_read_rejects_mismatched_peer_id() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = LocalStateDir::new(temp.path());
+    IdentityFile::create_or_load(&state).unwrap();
+    let path = state.identity_path();
+    let mut identity: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    identity["peer_id"] = serde_json::Value::String(derive_peer_id(&[9_u8; 32]).to_string());
+    std::fs::write(&path, serde_json::to_vec_pretty(&identity).unwrap()).unwrap();
+
+    assert!(IdentityFile::read_from(path).is_err());
+}
+
+#[test]
+fn identity_read_rejects_invalid_key_encoding_or_length() {
+    for (field, value) in [
+        ("public_key", "not base64!"),
+        ("public_key", "AQID"),
+        ("private_key", "not base64!"),
+        ("private_key", "AQID"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let state = LocalStateDir::new(temp.path());
+        IdentityFile::create_or_load(&state).unwrap();
+        let path = state.identity_path();
+        let mut identity: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        identity[field] = serde_json::Value::String(value.to_string());
+        std::fs::write(&path, serde_json::to_vec_pretty(&identity).unwrap()).unwrap();
+
+        assert!(IdentityFile::read_from(path).is_err(), "{field}={value}");
+    }
+}
+
+#[test]
+fn identity_read_rejects_private_key_that_does_not_match_public_key() {
+    let public_temp = tempfile::tempdir().unwrap();
+    let public_state = LocalStateDir::new(public_temp.path());
+    IdentityFile::create_or_load(&public_state).unwrap();
+    let private_temp = tempfile::tempdir().unwrap();
+    let private_state = LocalStateDir::new(private_temp.path());
+    IdentityFile::create_or_load(&private_state).unwrap();
+
+    let path = public_state.identity_path();
+    let private_identity: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(private_state.identity_path()).unwrap()).unwrap();
+    let mut identity: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    identity["private_key"] = private_identity["private_key"].clone();
+    std::fs::write(&path, serde_json::to_vec_pretty(&identity).unwrap()).unwrap();
+
+    assert!(IdentityFile::read_from(path).is_err());
+}
+
 #[cfg(unix)]
 #[test]
 fn identity_file_is_written_with_restrictive_permissions() {
