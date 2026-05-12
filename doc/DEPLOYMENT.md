@@ -13,7 +13,7 @@ The repository does not yet contain a deployable HTTP server or Dockerfile. Befo
 - Treat messages, activity sync events, and hosted backups as ciphertext.
 - Emit AI-readable structured logs that follow `OBSERVABILITY.md`.
 
-`.github/workflows/deploy.yml` exists now and runs Rust verification on pushes to `main`. Its Cloud Run deploy job is gated by the repository variable `ENABLE_CLOUD_RUN_DEPLOY == true`, so it will not deploy until the server and Google Cloud setup are ready.
+`.github/workflows/deploy.yml` exists now and runs Rust verification on pushes to `main`. Its deploy job is on by default, can be paused with `PAUSE_CLOUD_RUN_DEPLOY=true`, and skips the actual Cloud Run deploy steps until a root `Dockerfile` exists.
 
 ## Deploy Flow
 
@@ -251,7 +251,7 @@ gcloud builds submit \
 Configure these GitHub repository variables:
 
 ```text
-ENABLE_CLOUD_RUN_DEPLOY=false
+PAUSE_CLOUD_RUN_DEPLOY=false
 GCP_PROJECT_ID=your-google-cloud-project
 GCP_PROJECT_NUMBER=123456789012
 GCP_REGION=us-central1
@@ -263,7 +263,11 @@ GCP_WORKLOAD_IDENTITY_PROVIDER=projects/123456789012/locations/global/workloadId
 AICHAN_PUBLIC_BASE_URL=https://aichan-server-...run.app
 ```
 
-Keep `ENABLE_CLOUD_RUN_DEPLOY=false` until the server and Dockerfile are ready. After the first deploy returns the Cloud Run URL, set `AICHAN_PUBLIC_BASE_URL` and redeploy.
+`PAUSE_CLOUD_RUN_DEPLOY` is optional. Missing or `false` means main-branch deployment is allowed. Set it to `true` only when you need to temporarily stop deployments.
+
+Do not store Google service account JSON keys in GitHub Secrets. For this deployment path, GitHub Secrets should be empty. Use GitHub repository variables for non-secret identifiers and Workload Identity Federation for authentication. Runtime secrets should live in Google Secret Manager and be mounted into Cloud Run later with `--set-secrets`.
+
+The actual deploy steps still require a root `Dockerfile`; before that exists, the workflow logs a notice and skips Cloud Run deployment successfully. After the first deploy returns the Cloud Run URL, set `AICHAN_PUBLIC_BASE_URL` and redeploy.
 
 The workflow builds this image tag:
 
@@ -279,7 +283,7 @@ It deploys with:
 - `min_instances = 0`.
 - `max_instances = 10`.
 
-The workflow smoke test currently calls `/health` with plain `curl`, so the frugal MVP service should allow public invocation before `ENABLE_CLOUD_RUN_DEPLOY` is enabled. If a private service is used later, update the workflow to call Cloud Run with an authenticated identity token.
+The workflow smoke test currently calls `/health` with plain `curl`, so the frugal MVP service should allow public invocation before the root `Dockerfile` is added and deployment starts. If a private service is used later, update the workflow to call Cloud Run with an authenticated identity token.
 
 ## Manual Cloud Run Deploy Fallback
 

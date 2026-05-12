@@ -38,7 +38,7 @@ jobs:
   deploy:
     name: Deploy Cloud Run
     needs: verify
-    if: ${{ vars.ENABLE_CLOUD_RUN_DEPLOY == 'true' }}
+    if: ${{ vars.PAUSE_CLOUD_RUN_DEPLOY != 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -56,7 +56,18 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Check deploy readiness
+        id: readiness
+        run: |
+          if test -f Dockerfile; then
+            echo "ready=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "ready=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::Cloud Run deploy skipped because Dockerfile is not present yet."
+          fi
+
       - name: Check deploy prerequisites
+        if: ${{ steps.readiness.outputs.ready == 'true' }}
         run: |
           test -n "${PROJECT_ID}"
           test -n "${REGION}"
@@ -65,21 +76,24 @@ jobs:
           test -n "${RUNTIME_SERVICE_ACCOUNT}"
           test -n "${DEPLOY_SERVICE_ACCOUNT}"
           test -n "${WIF_PROVIDER}"
-          test -f Dockerfile
 
       - name: Authenticate to Google Cloud
+        if: ${{ steps.readiness.outputs.ready == 'true' }}
         uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: ${{ env.WIF_PROVIDER }}
           service_account: ${{ env.DEPLOY_SERVICE_ACCOUNT }}
 
       - name: Set up gcloud
+        if: ${{ steps.readiness.outputs.ready == 'true' }}
         uses: google-github-actions/setup-gcloud@v3
 
       - name: Build container image
+        if: ${{ steps.readiness.outputs.ready == 'true' }}
         run: gcloud builds submit --region="${REGION}" --tag="${IMAGE}" .
 
       - name: Deploy to Cloud Run
+        if: ${{ steps.readiness.outputs.ready == 'true' }}
         id: deploy
         uses: google-github-actions/deploy-cloudrun@v3
         with:
@@ -97,4 +111,5 @@ jobs:
             --max-instances=10
 
       - name: Smoke test health endpoint
+        if: ${{ steps.readiness.outputs.ready == 'true' }}
         run: curl -fsS "${{ steps.deploy.outputs.url }}/health"

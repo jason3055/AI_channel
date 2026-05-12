@@ -1,18 +1,20 @@
 # GitHub Actions
 
-AI Channel should eventually deploy from `main` automatically. The workflow is present now, but Cloud Run deploy is gated until the server is actually deployable.
+AI Channel deploys from `main` by default once the server is actually deployable. The workflow is present now and has a readiness check so early pushes can verify the Rust workspace without failing on a missing Dockerfile.
 
 ## Current Status
 
 `.github/workflows/deploy.yml` runs Rust verification on every push to `main`.
 
-The deploy job runs only when this repository variable is set:
+The deploy job is on by default. It is skipped only when this repository variable is set:
 
 ```text
-ENABLE_CLOUD_RUN_DEPLOY=true
+PAUSE_CLOUD_RUN_DEPLOY=true
 ```
 
-Keep it unset or `false` until all of these are true:
+Inside the deploy job, the actual Cloud Run deploy steps run only when a root `Dockerfile` exists. Until then, the job emits a notice and exits successfully.
+
+Before adding the root `Dockerfile`, make sure all of these are true:
 
 - `crates/aichan-server` runs an HTTP server.
 - The server listens on `0.0.0.0:$PORT`.
@@ -61,7 +63,7 @@ It authenticates with:
 Configure these in GitHub repository settings under Actions variables:
 
 ```text
-ENABLE_CLOUD_RUN_DEPLOY=false
+PAUSE_CLOUD_RUN_DEPLOY=false
 GCP_PROJECT_ID=your-google-cloud-project
 GCP_PROJECT_NUMBER=123456789012
 GCP_REGION=us-central1
@@ -73,7 +75,36 @@ GCP_WORKLOAD_IDENTITY_PROVIDER=projects/123456789012/locations/global/workloadId
 AICHAN_PUBLIC_BASE_URL=https://aichan-server-...run.app
 ```
 
+`PAUSE_CLOUD_RUN_DEPLOY` is optional. If it is missing or `false`, deployment is considered enabled. Set it to `true` only when you want to temporarily stop main-branch deploys.
+
 The first deploy can leave `AICHAN_PUBLIC_BASE_URL` blank and update it after Cloud Run returns the service URL. Once the stable URL is known, set the variable and redeploy.
+
+## Repository Secrets
+
+Do not store a Google service account JSON key in GitHub Secrets.
+
+For the current Cloud Run deployment path, GitHub Secrets should be empty. Use repository variables for non-secret deployment identifiers and Workload Identity Federation for authentication.
+
+If a future integration needs real secret material, prefer Google Secret Manager and inject it into Cloud Run at runtime. Only use GitHub Secrets for values that GitHub Actions itself must consume directly and cannot obtain through Google Cloud identity.
+
+Examples that belong in GitHub Actions variables:
+
+- Google Cloud project id and number.
+- Region.
+- Cloud Run service name.
+- Artifact Registry repository name.
+- Runtime and deploy service account emails.
+- Workload Identity Provider resource name.
+- Public base URL.
+
+Examples that should not be stored in GitHub:
+
+- Google service account JSON keys.
+- AI Channel private keys.
+- Recovery phrases.
+- Backup encryption keys.
+- Log hash secrets.
+- Third-party API tokens used only by the running service.
 
 ## Google Cloud Identities
 
@@ -86,8 +117,8 @@ This keeps runtime permissions smaller than deploy permissions.
 
 ## Workflow Guardrails
 
-- The deploy job checks for a root `Dockerfile` before building.
-- The deploy job is skipped unless `ENABLE_CLOUD_RUN_DEPLOY` is exactly `true`.
+- The deploy job is on by default and can be paused with `PAUSE_CLOUD_RUN_DEPLOY=true`.
+- The deploy job checks for a root `Dockerfile` before building. Without a Dockerfile, deploy steps are skipped successfully.
 - The workflow does not grant public access to the Cloud Run service. Configure public access once in Google Cloud, then let deployments preserve it.
 - The workflow uses commit SHA image tags so each deploy points to a specific Git revision.
 - The smoke test uses unauthenticated `curl` against `/health`. If the service is private later, replace it with an authenticated Cloud Run request.
