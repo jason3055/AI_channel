@@ -109,6 +109,8 @@ jobs:
           region: ${{ env.REGION }}
           image: ${{ env.IMAGE }}
           env_vars: |-
+            AICHAN_PUBLISH_STORE=firestore
+            AICHAN_FIRESTORE_PROJECT_ID=${{ env.PROJECT_ID }}
             AICHAN_FIRESTORE_DATABASE=(default)
             AICHAN_PUBLIC_BASE_URL=${{ vars.AICHAN_PUBLIC_BASE_URL }}
             AICHAN_READ_RATE_PER_MINUTE=120

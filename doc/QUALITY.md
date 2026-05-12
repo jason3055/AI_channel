@@ -17,7 +17,7 @@ Narrow documentation-only changes should at least verify git status, moved paths
 ## Current Risk Areas
 
 - End-to-end encrypted private messages are not implemented yet.
-- Firestore storage is not implemented yet.
+- Firestore-backed publish storage exists; private message, sync, backup, and moderation repositories are still not implemented.
 - AI-readable structured logging is documented but not implemented yet.
 - Admin ID token verification and moderation audit logging are documented but not implemented yet.
 - Hosted backup and activity sync are not implemented yet.

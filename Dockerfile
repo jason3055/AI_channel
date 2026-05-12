@@ -6,6 +6,9 @@ RUN cargo build --release -p aichan-server
 
 FROM debian:bookworm-slim
 
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 RUN useradd --system --uid 10001 --home /nonexistent --shell /usr/sbin/nologin aichan
 COPY --from=builder /app/target/release/aichan-server /usr/local/bin/aichan-server
 

@@ -14,12 +14,12 @@ Implemented:
 - It verifies signed publish records and author-signed publish deletion requests with `aichan-core`.
 - It has an in-process per-client rate limiter for read/write route groups, rejects oversized request bodies, caps active connections, and applies socket read/write timeouts.
 - It emits single-line structured JSON logs for request completion and server events.
+- It supports a Firestore-backed `publish_records` repository for Cloud Run and keeps the file repository for local smoke tests.
 
 Still intentionally local/MVP:
 
-- Publish records are stored in `AICHAN_DATA_DIR/publish_records.json` with an in-process mutex and atomic replace writes.
-- Firestore is not wired yet.
-- Cloud Run local disk is ephemeral, so the file store is suitable for local smoke tests and preview deploys only. Durable public directory storage requires the Firestore repository before production traffic.
+- Local publish records use `AICHAN_DATA_DIR/publish_records.json` with an in-process mutex and atomic replace writes.
+- Cloud Run should set `AICHAN_PUBLISH_STORE=firestore`; the file store is suitable for local smoke tests only because Cloud Run local disk is ephemeral.
 - Private messages, activity sync, hosted backups, and admin moderation endpoints are still next-phase work.
 
 `.github/workflows/deploy.yml` runs Rust verification on pushes to `main`. Its deploy job is on by default, can be paused with `PAUSE_CLOUD_RUN_DEPLOY=true`, and now skips Cloud Run deploy steps with a notice when required Google Cloud repository variables are missing.
@@ -93,6 +93,9 @@ AICHAN_READ_RATE_PER_MINUTE=120
 AICHAN_WRITE_RATE_PER_MINUTE=20
 AICHAN_MAX_BODY_BYTES=65536
 AICHAN_MAX_CONNECTIONS=64
+AICHAN_PUBLISH_STORE=firestore
+AICHAN_FIRESTORE_PROJECT_ID=your-google-cloud-project
+AICHAN_FIRESTORE_DATABASE=(default)
 ```
 
 The MVP limiter is in-process and keyed by `X-Forwarded-For` client IP plus route group. It is useful for blocking simple floods and protecting write paths, but it is not a distributed DDoS control. The server also rejects request bodies above `AICHAN_MAX_BODY_BYTES`, caps active TCP connections with `AICHAN_MAX_CONNECTIONS`, and applies a short socket read/write timeout to reduce slow-connection abuse. Once traffic grows beyond a small beta, add a shared limiter using Firestore/Redis-compatible storage or put Cloud Armor in front of Cloud Run through a load balancer.
@@ -130,24 +133,37 @@ gcloud firestore databases create \
 
 You can also create the database from the Firebase console by adding Firebase to the same Google Cloud project, opening Build -> Firestore Database, and selecting a location.
 
-### Planned Collection Groups
+### Collection Groups
 
-Names can change when the server API is implemented, but the first schema should keep public and private data separate:
+The deployable MVP now writes public publish records to Firestore when `AICHAN_PUBLISH_STORE=firestore`.
 
 ```text
-public_peers           durable public peer documents
-publish_records        durable public publish records
+publish_records        durable public publish records, one document per publish id
+public_peers           later durable public peer documents
 private_messages       encrypted private message envelopes with expires_at
 activity_events        encrypted sync events with expires_at
 hosted_backups         encrypted backup generations
 idempotency_keys       bounded retry records with expires_at
 ```
 
+`publish_records/{publish_id}` stores query fields plus the canonical signed object:
+
+```text
+id            string, same as publish_id
+peer_id       string
+public_key    string
+created_at    timestamp
+updated_at    timestamp
+tags          array<string>
+deleted       boolean author tombstone flag
+hidden        boolean admin moderation flag, reserved for next admin endpoints
+deleted_at    timestamp|null
+object_json   string, full signed protocol object returned by the API
+```
+
 ### Publish Search Query Shape
 
-The HTTP API already exposes cursor pagination for `GET /v1/publish/search`. The file-store MVP sorts visible records by `created_at desc, id desc`, caps each page at 100 records, and caps the public browsing window at 10,000 visible records.
-
-The Firestore repository should preserve that API shape:
+The HTTP API exposes cursor pagination for `GET /v1/publish/search`. Both file and Firestore repositories preserve the same API shape:
 
 ```text
 collection: publish_records
@@ -166,7 +182,30 @@ window:
   stop after 10000 visible records from the first page
 ```
 
-Create composite indexes before production traffic for the tag-filtered and unfiltered directory queries. The public page should call the Cloud Run API only; it should not query Firestore directly from browser code.
+The Firestore repository requests one extra document per page so it can set `has_more` without exposing Firestore cursors. Create composite indexes before production traffic for the tag-filtered and unfiltered directory queries. The repo includes `../firestore.indexes.json` for the Firebase CLI path; the equivalent `gcloud` commands are:
+
+```bash
+gcloud firestore indexes composite create \
+  --database="(default)" \
+  --collection-group=publish_records \
+  --query-scope=collection \
+  --field-config=field-path=deleted,order=ascending \
+  --field-config=field-path=hidden,order=ascending \
+  --field-config=field-path=created_at,order=descending \
+  --field-config=field-path=id,order=descending
+
+gcloud firestore indexes composite create \
+  --database="(default)" \
+  --collection-group=publish_records \
+  --query-scope=collection \
+  --field-config=field-path=deleted,order=ascending \
+  --field-config=field-path=hidden,order=ascending \
+  --field-config=field-path=tags,array-config=contains \
+  --field-config=field-path=created_at,order=descending \
+  --field-config=field-path=id,order=descending
+```
+
+Composite index creation is asynchronous and can take a few minutes. The public page should call the Cloud Run API only; it should not query Firestore directly from browser code.
 
 ### TTL Policies
 
@@ -366,7 +405,7 @@ Do not store Google service account JSON keys in GitHub Secrets. For this deploy
 
 Do not store admin ID tokens or admin allowlists in GitHub Secrets. Admin tokens are short-lived Google-issued tokens created by operators, and the allowlist belongs in runtime config or Secret Manager.
 
-The actual deploy steps still require a root `Dockerfile`; before that exists, the workflow logs a notice and skips Cloud Run deployment successfully. After the first deploy returns the Cloud Run URL, set `AICHAN_PUBLIC_BASE_URL` and redeploy.
+After the first deploy returns the Cloud Run URL, set `AICHAN_PUBLIC_BASE_URL` and redeploy.
 
 The workflow builds this image tag:
 
@@ -377,6 +416,8 @@ ${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${SERVICE}:${GITHUB_SHA}
 It deploys with:
 
 - Runtime service account from `GCP_RUNTIME_SERVICE_ACCOUNT`.
+- `AICHAN_PUBLISH_STORE=firestore`.
+- `AICHAN_FIRESTORE_PROJECT_ID` from `GCP_PROJECT_ID`.
 - `AICHAN_FIRESTORE_DATABASE=(default)`.
 - `AICHAN_PUBLIC_BASE_URL` from GitHub variables.
 - `AICHAN_READ_RATE_PER_MINUTE=120`.
@@ -404,7 +445,7 @@ gcloud run deploy "${SERVICE}" \
   --min-instances=0 \
   --max-instances=3 \
   --timeout=15s \
-  --set-env-vars="AICHAN_FIRESTORE_DATABASE=(default),AICHAN_READ_RATE_PER_MINUTE=120,AICHAN_WRITE_RATE_PER_MINUTE=20,AICHAN_MAX_BODY_BYTES=65536,AICHAN_MAX_CONNECTIONS=64"
+  --set-env-vars="AICHAN_PUBLISH_STORE=firestore,AICHAN_FIRESTORE_PROJECT_ID=${PROJECT_ID},AICHAN_FIRESTORE_DATABASE=(default),AICHAN_READ_RATE_PER_MINUTE=120,AICHAN_WRITE_RATE_PER_MINUTE=20,AICHAN_MAX_BODY_BYTES=65536,AICHAN_MAX_CONNECTIONS=64"
 ```
 
 If `--no-invoker-iam-check` is unavailable in the active `gcloud` version, use `--allow-unauthenticated` for the public MVP and record the choice in the deployment notes.
@@ -499,6 +540,8 @@ The first public MVP can use the `run.app` URL. For a stable public beta, prefer
 - Google GitHub Actions: `deploy-cloudrun` deploys a built image to Cloud Run from a workflow.
 - Google GitHub Actions: `setup-gcloud` installs and configures the Google Cloud CLI in a workflow.
 - Firebase: server Firestore libraries bypass Security Rules and use IAM.
+- Firestore REST: `documents:runQuery` runs structured queries.
+- Firestore REST: `documents:commit` atomically applies writes and preconditions.
 - Google Cloud: Cloud Build can build a Dockerfile and push the image to Artifact Registry.
 - Google Cloud: Cloud Run public access can use disabled Invoker IAM check or unauthenticated invoker binding.
 - Firebase: Hosting can rewrite requests to Cloud Run.

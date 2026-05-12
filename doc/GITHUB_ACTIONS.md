@@ -125,6 +125,7 @@ This keeps runtime permissions smaller than deploy permissions.
 - The workflow does not grant public access to the Cloud Run service. Configure public access once in Google Cloud, then let deployments preserve it.
 - The workflow uses commit SHA image tags so each deploy points to a specific Git revision.
 - The workflow deploys the MVP with `min-instances=0`, `max-instances=3`, `timeout=15s`, and conservative application rate-limit environment variables.
+- Cloud Run deploys with `AICHAN_PUBLISH_STORE=firestore`, `AICHAN_FIRESTORE_PROJECT_ID`, and `AICHAN_FIRESTORE_DATABASE=(default)` so public publish records survive instance restarts.
 - The smoke test uses unauthenticated `curl` against `/health`. If the service is private later, replace it with an authenticated Cloud Run request.
 
 ## Failure Triage

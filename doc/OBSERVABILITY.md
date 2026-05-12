@@ -77,6 +77,10 @@ admin.publish.restored
 admin.publish.rejected
 firestore.query.completed
 firestore.query.failed
+firestore.write.completed
+firestore.write.failed
+firestore.get.completed
+firestore.get.failed
 rate_limit.triggered
 request.failed
 ```

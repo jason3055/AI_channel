@@ -17,13 +17,12 @@ use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ServerState {
-    data_dir: Arc<PathBuf>,
     public_base_url: Arc<String>,
     rate_limiter: Arc<RateLimiter>,
     connection_limiter: Arc<ConnectionLimiter>,
-    publish_store_lock: Arc<Mutex<()>>,
+    publish_store: Arc<PublishStore>,
     request_auth: Arc<RequestAuthTracker>,
 }
 
@@ -69,21 +68,33 @@ impl ServerState {
         rate_limits: RateLimitConfig,
         max_connections: usize,
     ) -> Result<Self> {
-        let data_dir = data_dir.as_ref().to_path_buf();
-        std::fs::create_dir_all(&data_dir)
-            .with_context(|| format!("create data dir {}", data_dir.display()))?;
+        let publish_store = Arc::new(PublishStore::file(data_dir)?);
+        Self::with_publish_store(publish_store, public_base_url, rate_limits, max_connections)
+    }
+
+    pub fn from_env(
+        data_dir: impl AsRef<Path>,
+        public_base_url: impl Into<String>,
+        rate_limits: RateLimitConfig,
+        max_connections: usize,
+    ) -> Result<Self> {
+        let publish_store = Arc::new(publish_store_from_env(data_dir.as_ref())?);
+        Self::with_publish_store(publish_store, public_base_url, rate_limits, max_connections)
+    }
+
+    fn with_publish_store(
+        publish_store: Arc<PublishStore>,
+        public_base_url: impl Into<String>,
+        rate_limits: RateLimitConfig,
+        max_connections: usize,
+    ) -> Result<Self> {
         Ok(Self {
-            data_dir: Arc::new(data_dir),
             public_base_url: Arc::new(public_base_url.into()),
             rate_limiter: Arc::new(RateLimiter::new(rate_limits)),
             connection_limiter: Arc::new(ConnectionLimiter::new(max_connections.max(1))),
-            publish_store_lock: Arc::new(Mutex::new(())),
+            publish_store,
             request_auth: Arc::new(RequestAuthTracker::default()),
         })
-    }
-
-    fn publish_store_path(&self) -> PathBuf {
-        self.data_dir.join("publish_records.json")
     }
 
     fn rate_limits(&self) -> RateLimitConfig {
@@ -390,7 +401,818 @@ impl HttpResponse {
 struct StoredPublishRecord {
     object: SignedProtocolObject<PublishRecordPayload>,
     deleted: bool,
+    #[serde(default)]
+    hidden: bool,
     deleted_at: Option<DateTime<Utc>>,
+}
+
+enum PublishStore {
+    File(FilePublishStore),
+    Firestore(FirestorePublishStore),
+}
+
+impl PublishStore {
+    fn file(data_dir: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self::File(FilePublishStore::new(data_dir)?))
+    }
+
+    fn upsert(
+        &self,
+        object: SignedProtocolObject<PublishRecordPayload>,
+        peer_id: &PeerId,
+    ) -> Result<PublishUpsertStatus> {
+        match self {
+            Self::File(store) => store.upsert(object, peer_id),
+            Self::Firestore(store) => store.upsert(object, peer_id),
+        }
+    }
+
+    fn search(&self, query: PublishSearchRequest) -> Result<PublishSearchPage> {
+        match self {
+            Self::File(store) => store.search(query),
+            Self::Firestore(store) => store.search(query),
+        }
+    }
+
+    fn mark_author_deleted(
+        &self,
+        publish_id: &str,
+        peer_id: &PeerId,
+    ) -> Result<PublishDeleteStatus> {
+        match self {
+            Self::File(store) => store.mark_author_deleted(publish_id, peer_id),
+            Self::Firestore(store) => store.mark_author_deleted(publish_id, peer_id),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublishUpsertStatus {
+    Stored,
+    PeerConflict,
+    AuthorDeleted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublishDeleteStatus {
+    Deleted,
+    NotFound,
+    WrongPeer,
+}
+
+#[derive(Debug, Clone)]
+struct PublishSearchRequest {
+    tag: Option<String>,
+    limit: usize,
+    cursor: Option<PublishSearchCursor>,
+}
+
+#[derive(Debug, Clone)]
+struct PublishSearchPage {
+    records: Vec<SignedProtocolObject<PublishRecordPayload>>,
+    next_cursor: Option<String>,
+    has_more: bool,
+}
+
+struct FilePublishStore {
+    path: PathBuf,
+    lock: Mutex<()>,
+}
+
+impl FilePublishStore {
+    fn new(data_dir: impl AsRef<Path>) -> Result<Self> {
+        let data_dir = data_dir.as_ref();
+        std::fs::create_dir_all(data_dir)
+            .with_context(|| format!("create data dir {}", data_dir.display()))?;
+        Ok(Self {
+            path: data_dir.join("publish_records.json"),
+            lock: Mutex::new(()),
+        })
+    }
+
+    fn upsert(
+        &self,
+        object: SignedProtocolObject<PublishRecordPayload>,
+        peer_id: &PeerId,
+    ) -> Result<PublishUpsertStatus> {
+        let _guard = self.lock.lock().expect("publish store mutex poisoned");
+        let mut records = self.load()?;
+
+        if let Some(existing) = records
+            .iter_mut()
+            .find(|entry| entry.object.id == object.id)
+        {
+            if existing.object.payload.peer_id != *peer_id {
+                return Ok(PublishUpsertStatus::PeerConflict);
+            }
+            if existing.deleted {
+                return Ok(PublishUpsertStatus::AuthorDeleted);
+            }
+            existing.object = object;
+            existing.deleted = false;
+            existing.deleted_at = None;
+        } else {
+            records.push(StoredPublishRecord {
+                object,
+                deleted: false,
+                hidden: false,
+                deleted_at: None,
+            });
+        }
+
+        self.save(&records)?;
+        Ok(PublishUpsertStatus::Stored)
+    }
+
+    fn search(&self, query: PublishSearchRequest) -> Result<PublishSearchPage> {
+        let records = self.load()?;
+        let tag = query.tag.as_deref();
+        let mut visible = records
+            .into_iter()
+            .filter(|entry| !entry.deleted && !entry.hidden)
+            .filter(|entry| publish_record_matches_tag(entry, tag))
+            .collect::<Vec<_>>();
+        visible.sort_by(compare_publish_records_newest_first);
+
+        paginate_ordered_publish_records(visible, query.limit, query.cursor.as_ref())
+    }
+
+    fn mark_author_deleted(
+        &self,
+        publish_id: &str,
+        peer_id: &PeerId,
+    ) -> Result<PublishDeleteStatus> {
+        let _guard = self.lock.lock().expect("publish store mutex poisoned");
+        let mut records = self.load()?;
+        let Some(index) = records
+            .iter()
+            .position(|entry| entry.object.id == publish_id && !entry.deleted)
+        else {
+            return Ok(PublishDeleteStatus::NotFound);
+        };
+
+        if records[index].object.payload.peer_id != *peer_id {
+            return Ok(PublishDeleteStatus::WrongPeer);
+        }
+
+        records[index].deleted = true;
+        records[index].deleted_at = Some(Utc::now());
+        self.save(&records)?;
+
+        Ok(PublishDeleteStatus::Deleted)
+    }
+
+    fn load(&self) -> Result<Vec<StoredPublishRecord>> {
+        if !self.path.exists() {
+            return Ok(Vec::new());
+        }
+        let bytes =
+            std::fs::read(&self.path).with_context(|| format!("read {}", self.path.display()))?;
+        serde_json::from_slice(&bytes).with_context(|| format!("parse {}", self.path.display()))
+    }
+
+    fn save(&self, records: &[StoredPublishRecord]) -> Result<()> {
+        let temp_path = self.path.with_file_name("publish_records.json.tmp");
+        let bytes = serde_json::to_vec_pretty(records)?;
+        std::fs::write(&temp_path, bytes)
+            .with_context(|| format!("write {}", temp_path.display()))?;
+        std::fs::rename(&temp_path, &self.path)
+            .with_context(|| format!("rename {} to {}", temp_path.display(), self.path.display()))
+    }
+}
+
+struct FirestorePublishStore {
+    config: FirestoreConfig,
+    client: reqwest::blocking::Client,
+    token_cache: Mutex<Option<CachedAccessToken>>,
+}
+
+impl FirestorePublishStore {
+    fn new(config: FirestoreConfig) -> Result<Self> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(REQUEST_READ_TIMEOUT)
+            .build()
+            .context("build Firestore HTTP client")?;
+        Ok(Self {
+            config,
+            client,
+            token_cache: Mutex::new(None),
+        })
+    }
+
+    fn upsert(
+        &self,
+        object: SignedProtocolObject<PublishRecordPayload>,
+        peer_id: &PeerId,
+    ) -> Result<PublishUpsertStatus> {
+        let name = self.document_name(&object.id);
+        let existing = self.get_record(&name)?;
+        match existing {
+            Some(FirestoreStoredDocument {
+                record,
+                update_time,
+            }) => {
+                if record.object.payload.peer_id != *peer_id {
+                    return Ok(PublishUpsertStatus::PeerConflict);
+                }
+                if record.deleted {
+                    return Ok(PublishUpsertStatus::AuthorDeleted);
+                }
+
+                let next = StoredPublishRecord {
+                    object,
+                    deleted: false,
+                    hidden: record.hidden,
+                    deleted_at: None,
+                };
+                self.commit_record(&name, &next, FirestorePrecondition::UpdateTime(update_time))?;
+            }
+            None => {
+                let record = StoredPublishRecord {
+                    object,
+                    deleted: false,
+                    hidden: false,
+                    deleted_at: None,
+                };
+                self.commit_record(&name, &record, FirestorePrecondition::Missing)?;
+            }
+        }
+
+        Ok(PublishUpsertStatus::Stored)
+    }
+
+    fn search(&self, query: PublishSearchRequest) -> Result<PublishSearchPage> {
+        let seen_before = query
+            .cursor
+            .as_ref()
+            .map(|cursor| cursor.seen)
+            .unwrap_or(0)
+            .min(PUBLISH_SEARCH_WINDOW_LIMIT);
+        let remaining_window = PUBLISH_SEARCH_WINDOW_LIMIT.saturating_sub(seen_before);
+        let page_limit = query.limit.min(remaining_window);
+        if page_limit == 0 {
+            return Ok(PublishSearchPage {
+                records: Vec::new(),
+                next_cursor: None,
+                has_more: false,
+            });
+        }
+
+        let body =
+            firestore_search_query_body(query.tag.as_deref(), page_limit, query.cursor.as_ref());
+        let response = self.post_json(&self.run_query_url(), &body, "firestore.run_query")?;
+        let documents = response
+            .as_array()
+            .context("Firestore runQuery response is not an array")?
+            .iter()
+            .filter_map(|entry| entry.get("document"))
+            .map(stored_record_from_firestore_document)
+            .collect::<Result<Vec<_>>>()?;
+
+        page_from_ordered_tail(documents, page_limit, seen_before)
+    }
+
+    fn mark_author_deleted(
+        &self,
+        publish_id: &str,
+        peer_id: &PeerId,
+    ) -> Result<PublishDeleteStatus> {
+        let name = self.document_name(publish_id);
+        let Some(FirestoreStoredDocument {
+            mut record,
+            update_time,
+        }) = self.get_record(&name)?
+        else {
+            return Ok(PublishDeleteStatus::NotFound);
+        };
+
+        if record.deleted {
+            return Ok(PublishDeleteStatus::NotFound);
+        }
+        if record.object.payload.peer_id != *peer_id {
+            return Ok(PublishDeleteStatus::WrongPeer);
+        }
+
+        record.deleted = true;
+        record.deleted_at = Some(Utc::now());
+        self.commit_record(
+            &name,
+            &record,
+            FirestorePrecondition::UpdateTime(update_time),
+        )?;
+
+        Ok(PublishDeleteStatus::Deleted)
+    }
+
+    fn get_record(&self, name: &str) -> Result<Option<FirestoreStoredDocument>> {
+        let url = format!(
+            "{}/{}",
+            self.config.api_base_url.trim_end_matches('/'),
+            name
+        );
+        let Some(document) = self.get_json(&url, "firestore.get_document")? else {
+            return Ok(None);
+        };
+        let update_time = document
+            .get("updateTime")
+            .and_then(serde_json::Value::as_str)
+            .context("Firestore document missing updateTime")?
+            .to_string();
+        let record = stored_record_from_firestore_document(&document)?;
+
+        Ok(Some(FirestoreStoredDocument {
+            record,
+            update_time,
+        }))
+    }
+
+    fn commit_record(
+        &self,
+        name: &str,
+        record: &StoredPublishRecord,
+        precondition: FirestorePrecondition,
+    ) -> Result<()> {
+        let document = firestore_document_from_record(name, record)?;
+        let body = json!({
+            "writes": [{
+                "update": document,
+                "currentDocument": precondition.to_json()
+            }]
+        });
+        self.post_json(&self.commit_url(), &body, "firestore.commit")?;
+        Ok(())
+    }
+
+    fn get_json(&self, url: &str, operation: &'static str) -> Result<Option<serde_json::Value>> {
+        let started = Instant::now();
+        let request = self.authorize(self.client.get(url))?;
+        let response = request
+            .send()
+            .with_context(|| format!("{operation} request failed"))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let status = response.status();
+        let text = response
+            .text()
+            .with_context(|| format!("{operation} response read failed"))?;
+        if !status.is_success() {
+            log_event(
+                firestore_event_name(operation, "failed"),
+                json!({
+                    "operation": operation,
+                    "status": status.as_u16(),
+                    "latency_ms": started.elapsed().as_millis()
+                }),
+            );
+            anyhow::bail!("{operation} failed with HTTP {}: {}", status.as_u16(), text);
+        }
+        log_event(
+            firestore_event_name(operation, "completed"),
+            json!({
+                "operation": operation,
+                "status": status.as_u16(),
+                "latency_ms": started.elapsed().as_millis()
+            }),
+        );
+        Ok(Some(
+            serde_json::from_str(&text).with_context(|| format!("{operation} invalid JSON"))?,
+        ))
+    }
+
+    fn post_json(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+        operation: &'static str,
+    ) -> Result<serde_json::Value> {
+        let started = Instant::now();
+        let request = self.authorize(self.client.post(url))?;
+        let response = request
+            .json(body)
+            .send()
+            .with_context(|| format!("{operation} request failed"))?;
+        let status = response.status();
+        let text = response
+            .text()
+            .with_context(|| format!("{operation} response read failed"))?;
+        if !status.is_success() {
+            log_event(
+                firestore_event_name(operation, "failed"),
+                json!({
+                    "operation": operation,
+                    "status": status.as_u16(),
+                    "latency_ms": started.elapsed().as_millis()
+                }),
+            );
+            anyhow::bail!("{operation} failed with HTTP {}: {}", status.as_u16(), text);
+        }
+        log_event(
+            firestore_event_name(operation, "completed"),
+            json!({
+                "operation": operation,
+                "status": status.as_u16(),
+                "latency_ms": started.elapsed().as_millis()
+            }),
+        );
+        serde_json::from_str(&text).with_context(|| format!("{operation} invalid JSON"))
+    }
+
+    fn authorize(
+        &self,
+        request: reqwest::blocking::RequestBuilder,
+    ) -> Result<reqwest::blocking::RequestBuilder> {
+        match &self.config.auth {
+            FirestoreAuth::None => Ok(request),
+            FirestoreAuth::Metadata => Ok(request.bearer_auth(self.metadata_access_token()?)),
+        }
+    }
+
+    fn metadata_access_token(&self) -> Result<String> {
+        let now = Instant::now();
+        if let Some(token) = self
+            .token_cache
+            .lock()
+            .expect("Firestore token cache mutex poisoned")
+            .as_ref()
+            .filter(|token| token.expires_at > now)
+        {
+            return Ok(token.value.clone());
+        }
+
+        let response: serde_json::Value = self
+            .client
+            .get(metadata_service_account_url("token"))
+            .header("Metadata-Flavor", "Google")
+            .send()
+            .context("request Google metadata access token")?
+            .error_for_status()
+            .context("Google metadata access token response")?
+            .json()
+            .context("parse Google metadata access token response")?;
+        let value = response
+            .get("access_token")
+            .and_then(serde_json::Value::as_str)
+            .context("Google metadata token response missing access_token")?
+            .to_string();
+        let expires_in = response
+            .get("expires_in")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(3600)
+            .saturating_sub(60)
+            .max(60);
+        let cached = CachedAccessToken {
+            value: value.clone(),
+            expires_at: Instant::now() + Duration::from_secs(expires_in),
+        };
+        *self
+            .token_cache
+            .lock()
+            .expect("Firestore token cache mutex poisoned") = Some(cached);
+
+        Ok(value)
+    }
+
+    fn document_name(&self, publish_id: &str) -> String {
+        format!(
+            "{}/publish_records/{}",
+            self.documents_root(),
+            percent_encode_path_segment(publish_id)
+        )
+    }
+
+    fn documents_root(&self) -> String {
+        format!(
+            "projects/{}/databases/{}/documents",
+            self.config.project_id, self.config.database_id
+        )
+    }
+
+    fn commit_url(&self) -> String {
+        format!(
+            "{}/projects/{}/databases/{}/documents:commit",
+            self.config.api_base_url.trim_end_matches('/'),
+            self.config.project_id,
+            self.config.database_id
+        )
+    }
+
+    fn run_query_url(&self) -> String {
+        format!(
+            "{}/{}:runQuery",
+            self.config.api_base_url.trim_end_matches('/'),
+            self.documents_root()
+        )
+    }
+}
+
+struct FirestoreStoredDocument {
+    record: StoredPublishRecord,
+    update_time: String,
+}
+
+enum FirestorePrecondition {
+    Missing,
+    UpdateTime(String),
+}
+
+impl FirestorePrecondition {
+    fn to_json(&self) -> serde_json::Value {
+        match self {
+            Self::Missing => json!({ "exists": false }),
+            Self::UpdateTime(update_time) => json!({ "updateTime": update_time }),
+        }
+    }
+}
+
+struct CachedAccessToken {
+    value: String,
+    expires_at: Instant,
+}
+
+struct FirestoreConfig {
+    project_id: String,
+    database_id: String,
+    api_base_url: String,
+    auth: FirestoreAuth,
+}
+
+enum FirestoreAuth {
+    Metadata,
+    None,
+}
+
+impl FirestoreConfig {
+    fn from_env() -> Result<Self> {
+        let database_id =
+            env_non_empty("AICHAN_FIRESTORE_DATABASE").unwrap_or_else(|| "(default)".to_string());
+        let project_id = env_non_empty("AICHAN_FIRESTORE_PROJECT_ID")
+            .or_else(|| env_non_empty("GOOGLE_CLOUD_PROJECT"))
+            .or_else(|| env_non_empty("GCP_PROJECT_ID"))
+            .map(Ok)
+            .unwrap_or_else(metadata_project_id)?;
+        if let Some(host) = env_non_empty("AICHAN_FIRESTORE_EMULATOR_HOST") {
+            return Ok(Self {
+                project_id,
+                database_id,
+                api_base_url: format!("http://{}/v1", host.trim_end_matches('/')),
+                auth: FirestoreAuth::None,
+            });
+        }
+
+        Ok(Self {
+            project_id,
+            database_id,
+            api_base_url: env_non_empty("AICHAN_FIRESTORE_API_BASE_URL")
+                .unwrap_or_else(|| "https://firestore.googleapis.com/v1".to_string()),
+            auth: FirestoreAuth::Metadata,
+        })
+    }
+}
+
+fn publish_store_from_env(data_dir: &Path) -> Result<PublishStore> {
+    let requested = env_non_empty("AICHAN_PUBLISH_STORE");
+    match requested.as_deref() {
+        Some("file") => return PublishStore::file(data_dir),
+        Some("firestore") => {
+            return Ok(PublishStore::Firestore(FirestorePublishStore::new(
+                FirestoreConfig::from_env()?,
+            )?))
+        }
+        Some(other) => anyhow::bail!("unsupported AICHAN_PUBLISH_STORE value: {other}"),
+        None => {}
+    }
+
+    if env_non_empty("AICHAN_FIRESTORE_PROJECT_ID").is_some()
+        || env_non_empty("AICHAN_FIRESTORE_DATABASE").is_some()
+        || env_non_empty("AICHAN_FIRESTORE_EMULATOR_HOST").is_some()
+    {
+        return Ok(PublishStore::Firestore(FirestorePublishStore::new(
+            FirestoreConfig::from_env()?,
+        )?));
+    }
+
+    PublishStore::file(data_dir)
+}
+
+fn metadata_project_id() -> Result<String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .context("build Google metadata HTTP client")?;
+    let project_id = client
+        .get("http://metadata.google.internal/computeMetadata/v1/project/project-id")
+        .header("Metadata-Flavor", "Google")
+        .send()
+        .context("request Google metadata project id")?
+        .error_for_status()
+        .context("Google metadata project id response")?
+        .text()
+        .context("read Google metadata project id response")?;
+    let project_id = project_id.trim();
+    if project_id.is_empty() {
+        anyhow::bail!("Google metadata project id response was empty");
+    }
+    Ok(project_id.to_string())
+}
+
+fn metadata_service_account_url(path: &str) -> String {
+    format!(
+        "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/{}",
+        path
+    )
+}
+
+fn firestore_event_name(operation: &str, outcome: &str) -> &'static str {
+    match (operation, outcome) {
+        ("firestore.run_query", "completed") => "firestore.query.completed",
+        ("firestore.run_query", "failed") => "firestore.query.failed",
+        ("firestore.commit", "completed") => "firestore.write.completed",
+        ("firestore.commit", "failed") => "firestore.write.failed",
+        ("firestore.get_document", "completed") => "firestore.get.completed",
+        ("firestore.get_document", "failed") => "firestore.get.failed",
+        (_, "failed") => "firestore.request.failed",
+        _ => "firestore.request.completed",
+    }
+}
+
+fn firestore_document_from_record(
+    name: &str,
+    record: &StoredPublishRecord,
+) -> Result<serde_json::Value> {
+    let object_json = serde_json::to_string(&record.object)?;
+    let deleted_at = record
+        .deleted_at
+        .map(|value| json!({ "timestampValue": firestore_timestamp(value) }))
+        .unwrap_or_else(|| json!({ "nullValue": null }));
+
+    Ok(json!({
+        "name": name,
+        "fields": {
+            "id": { "stringValue": record.object.id },
+            "peer_id": { "stringValue": record.object.payload.peer_id.as_str() },
+            "public_key": { "stringValue": record.object.payload.public_key },
+            "created_at": { "timestampValue": firestore_timestamp(record.object.created_at) },
+            "updated_at": { "timestampValue": firestore_timestamp(record.object.payload.updated_at) },
+            "tags": firestore_string_array(&record.object.payload.tags),
+            "deleted": { "booleanValue": record.deleted },
+            "hidden": { "booleanValue": record.hidden },
+            "deleted_at": deleted_at,
+            "object_json": { "stringValue": object_json }
+        }
+    }))
+}
+
+fn stored_record_from_firestore_document(
+    document: &serde_json::Value,
+) -> Result<StoredPublishRecord> {
+    let fields = document
+        .get("fields")
+        .and_then(serde_json::Value::as_object)
+        .context("Firestore document missing fields")?;
+    let object_json = firestore_string_field(fields, "object_json")?;
+    let object = serde_json::from_str::<SignedProtocolObject<PublishRecordPayload>>(object_json)
+        .context("Firestore object_json is not a publish record")?;
+    let deleted = firestore_bool_field(fields, "deleted").unwrap_or(false);
+    let hidden = firestore_bool_field(fields, "hidden").unwrap_or(false);
+    let deleted_at = firestore_optional_timestamp_field(fields, "deleted_at")?;
+
+    Ok(StoredPublishRecord {
+        object,
+        deleted,
+        hidden,
+        deleted_at,
+    })
+}
+
+fn firestore_search_query_body(
+    tag: Option<&str>,
+    page_limit: usize,
+    cursor: Option<&PublishSearchCursor>,
+) -> serde_json::Value {
+    let mut filters = vec![
+        json!({
+            "fieldFilter": {
+                "field": { "fieldPath": "deleted" },
+                "op": "EQUAL",
+                "value": { "booleanValue": false }
+            }
+        }),
+        json!({
+            "fieldFilter": {
+                "field": { "fieldPath": "hidden" },
+                "op": "EQUAL",
+                "value": { "booleanValue": false }
+            }
+        }),
+    ];
+    if let Some(tag) = tag {
+        filters.push(json!({
+            "fieldFilter": {
+                "field": { "fieldPath": "tags" },
+                "op": "ARRAY_CONTAINS",
+                "value": { "stringValue": tag }
+            }
+        }));
+    }
+
+    let mut structured = json!({
+        "from": [{ "collectionId": "publish_records" }],
+        "where": {
+            "compositeFilter": {
+                "op": "AND",
+                "filters": filters
+            }
+        },
+        "orderBy": [
+            { "field": { "fieldPath": "created_at" }, "direction": "DESCENDING" },
+            { "field": { "fieldPath": "id" }, "direction": "DESCENDING" }
+        ],
+        "limit": page_limit.saturating_add(1)
+    });
+
+    if let Some(cursor) = cursor {
+        structured["startAt"] = json!({
+            "values": [
+                { "timestampValue": firestore_timestamp(cursor.created_at) },
+                { "stringValue": cursor.id }
+            ],
+            "before": false
+        });
+    }
+
+    json!({ "structuredQuery": structured })
+}
+
+fn firestore_string_array(values: &[String]) -> serde_json::Value {
+    json!({
+        "arrayValue": {
+            "values": values
+                .iter()
+                .map(|value| json!({ "stringValue": value }))
+                .collect::<Vec<_>>()
+        }
+    })
+}
+
+fn firestore_string_field<'a>(
+    fields: &'a serde_json::Map<String, serde_json::Value>,
+    name: &str,
+) -> Result<&'a str> {
+    fields
+        .get(name)
+        .and_then(|value| value.get("stringValue"))
+        .and_then(serde_json::Value::as_str)
+        .with_context(|| format!("Firestore document missing string field {name}"))
+}
+
+fn firestore_bool_field(
+    fields: &serde_json::Map<String, serde_json::Value>,
+    name: &str,
+) -> Option<bool> {
+    fields
+        .get(name)
+        .and_then(|value| value.get("booleanValue"))
+        .and_then(serde_json::Value::as_bool)
+}
+
+fn firestore_optional_timestamp_field(
+    fields: &serde_json::Map<String, serde_json::Value>,
+    name: &str,
+) -> Result<Option<DateTime<Utc>>> {
+    let Some(value) = fields.get(name) else {
+        return Ok(None);
+    };
+    if value.get("nullValue").is_some() {
+        return Ok(None);
+    }
+    let Some(timestamp) = value
+        .get("timestampValue")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(
+        DateTime::parse_from_rfc3339(timestamp)
+            .with_context(|| format!("Firestore document has invalid timestamp field {name}"))?
+            .with_timezone(&Utc),
+    ))
+}
+
+fn firestore_timestamp(value: DateTime<Utc>) -> String {
+    value.to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn percent_encode_path_segment(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                vec![byte as char]
+            }
+            _ => format!("%{byte:02X}").chars().collect::<Vec<_>>(),
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -420,7 +1242,7 @@ pub fn run_from_env() -> Result<()> {
     let data_dir = env_non_empty("AICHAN_DATA_DIR").unwrap_or_else(|| "/tmp/aichan-server".into());
     let public_base_url =
         env_non_empty("AICHAN_PUBLIC_BASE_URL").unwrap_or_else(|| format!("http://{addr}"));
-    let state = ServerState::with_public_base_url_rate_limits_and_max_connections(
+    let state = ServerState::from_env(
         data_dir,
         public_base_url,
         RateLimitConfig::from_env(),
@@ -554,60 +1376,32 @@ fn publish_record(state: &ServerState, request: &HttpRequest) -> HttpResponse {
         }
     };
 
-    let _store_guard = state
-        .publish_store_lock
-        .lock()
-        .expect("publish store mutex poisoned");
-    let mut records = match load_publish_records(state) {
-        Ok(records) => records,
-        Err(error) => {
-            return error_response(
-                500,
-                "storage_unavailable",
-                format!("Could not read publish store: {error}"),
-                true,
-            )
-        }
-    };
-
-    if let Some(existing) = records
-        .iter_mut()
-        .find(|entry| entry.object.id == object.id)
-    {
-        if existing.object.payload.peer_id != peer_id {
+    match state.publish_store.upsert(object.clone(), &peer_id) {
+        Ok(PublishUpsertStatus::Stored) => {}
+        Ok(PublishUpsertStatus::PeerConflict) => {
             return error_response(
                 409,
                 "conflict",
                 "Publish id already belongs to another peer.",
                 false,
-            );
+            )
         }
-        if existing.deleted {
+        Ok(PublishUpsertStatus::AuthorDeleted) => {
             return error_response(
                 409,
                 "publish_deleted",
                 "Publish id was author-deleted and cannot be reused.",
                 false,
-            );
+            )
         }
-        existing.object = object.clone();
-        existing.deleted = false;
-        existing.deleted_at = None;
-    } else {
-        records.push(StoredPublishRecord {
-            object: object.clone(),
-            deleted: false,
-            deleted_at: None,
-        });
-    }
-
-    if let Err(error) = save_publish_records(state, &records) {
-        return error_response(
-            500,
-            "storage_unavailable",
-            format!("Could not write publish store: {error}"),
-            true,
-        );
+        Err(error) => {
+            return error_response(
+                500,
+                "storage_unavailable",
+                format!("Could not write publish store: {error}"),
+                true,
+            )
+        }
     }
 
     json_response(
@@ -643,8 +1437,12 @@ fn search_publish_records(state: &ServerState, request: &HttpRequest) -> HttpRes
         None => None,
     };
 
-    let records = match load_publish_records(state) {
-        Ok(records) => records,
+    let page = match state.publish_store.search(PublishSearchRequest {
+        tag: tag.map(str::to_string),
+        limit,
+        cursor,
+    }) {
+        Ok(page) => page,
         Err(error) => {
             return error_response(
                 500,
@@ -655,89 +1453,13 @@ fn search_publish_records(state: &ServerState, request: &HttpRequest) -> HttpRes
         }
     };
 
-    let mut visible = records
-        .into_iter()
-        .filter(|entry| !entry.deleted)
-        .filter(|entry| {
-            tag.map(|tag| {
-                entry
-                    .object
-                    .payload
-                    .tags
-                    .iter()
-                    .any(|candidate| candidate == tag)
-            })
-            .unwrap_or(true)
-        })
-        .collect::<Vec<_>>();
-    visible.sort_by(|left, right| {
-        right
-            .object
-            .created_at
-            .cmp(&left.object.created_at)
-            .then_with(|| right.object.id.cmp(&left.object.id))
-    });
-
-    let start_index = cursor
-        .as_ref()
-        .and_then(|cursor| {
-            visible
-                .iter()
-                .position(|entry| publish_record_is_older_than_cursor(entry, cursor))
-        })
-        .unwrap_or_else(|| if cursor.is_some() { visible.len() } else { 0 });
-    let seen_before = cursor
-        .as_ref()
-        .map(|cursor| cursor.seen.min(PUBLISH_SEARCH_WINDOW_LIMIT))
-        .unwrap_or(0);
-    let remaining_window = PUBLISH_SEARCH_WINDOW_LIMIT.saturating_sub(seen_before);
-    let page_limit = limit.min(remaining_window);
-    let page = visible
-        .iter()
-        .skip(start_index)
-        .take(page_limit)
-        .cloned()
-        .collect::<Vec<_>>();
-    let new_seen = seen_before + page.len();
-    let consumed = start_index + page.len();
-    let has_more = consumed < visible.len() && new_seen < PUBLISH_SEARCH_WINDOW_LIMIT;
-    let next_cursor = if has_more {
-        match page.last() {
-            Some(last) => {
-                let cursor = PublishSearchCursor {
-                    created_at: last.object.created_at,
-                    id: last.object.id.clone(),
-                    seen: new_seen,
-                };
-                match cursor.encode() {
-                    Ok(value) => Some(value),
-                    Err(error) => {
-                        return error_response(
-                            500,
-                            "cursor_encoding_failed",
-                            format!("Could not encode publish search cursor: {error}"),
-                            true,
-                        )
-                    }
-                }
-            }
-            None => None,
-        }
-    } else {
-        None
-    };
-    let records = page
-        .into_iter()
-        .map(|entry| entry.object)
-        .collect::<Vec<_>>();
-
     json_response(
         200,
         json!({
-            "count": records.len(),
-            "records": records,
-            "next_cursor": next_cursor,
-            "has_more": has_more,
+            "count": page.records.len(),
+            "records": page.records,
+            "next_cursor": page.next_cursor,
+            "has_more": page.has_more,
             "window_limit": PUBLISH_SEARCH_WINDOW_LIMIT,
         }),
     )
@@ -751,33 +1473,100 @@ fn publish_record_is_older_than_cursor(
         || (entry.object.created_at == cursor.created_at && entry.object.id < cursor.id)
 }
 
+fn compare_publish_records_newest_first(
+    left: &StoredPublishRecord,
+    right: &StoredPublishRecord,
+) -> std::cmp::Ordering {
+    right
+        .object
+        .created_at
+        .cmp(&left.object.created_at)
+        .then_with(|| right.object.id.cmp(&left.object.id))
+}
+
+fn publish_record_matches_tag(entry: &StoredPublishRecord, tag: Option<&str>) -> bool {
+    tag.map(|tag| {
+        entry
+            .object
+            .payload
+            .tags
+            .iter()
+            .any(|candidate| candidate == tag)
+    })
+    .unwrap_or(true)
+}
+
+fn paginate_ordered_publish_records(
+    ordered: Vec<StoredPublishRecord>,
+    limit: usize,
+    cursor: Option<&PublishSearchCursor>,
+) -> Result<PublishSearchPage> {
+    let start_index = cursor
+        .and_then(|cursor| {
+            ordered
+                .iter()
+                .position(|entry| publish_record_is_older_than_cursor(entry, cursor))
+        })
+        .unwrap_or_else(|| if cursor.is_some() { ordered.len() } else { 0 });
+
+    page_from_ordered_tail(
+        ordered.into_iter().skip(start_index),
+        limit,
+        cursor.map(|cursor| cursor.seen).unwrap_or(0),
+    )
+}
+
+fn page_from_ordered_tail(
+    records: impl IntoIterator<Item = StoredPublishRecord>,
+    limit: usize,
+    seen_before: usize,
+) -> Result<PublishSearchPage> {
+    let seen_before = seen_before.min(PUBLISH_SEARCH_WINDOW_LIMIT);
+    let remaining_window = PUBLISH_SEARCH_WINDOW_LIMIT.saturating_sub(seen_before);
+    let page_limit = limit.min(remaining_window);
+    let mut candidates = records
+        .into_iter()
+        .take(page_limit.saturating_add(1))
+        .collect::<Vec<_>>();
+    let has_extra = candidates.len() > page_limit;
+    if has_extra {
+        candidates.truncate(page_limit);
+    }
+
+    let new_seen = seen_before + candidates.len();
+    let has_more = has_extra && new_seen < PUBLISH_SEARCH_WINDOW_LIMIT;
+    let next_cursor = if has_more {
+        candidates
+            .last()
+            .map(|last| {
+                PublishSearchCursor {
+                    created_at: last.object.created_at,
+                    id: last.object.id.clone(),
+                    seen: new_seen,
+                }
+                .encode()
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let records = candidates
+        .into_iter()
+        .map(|entry| entry.object)
+        .collect::<Vec<_>>();
+
+    Ok(PublishSearchPage {
+        records,
+        next_cursor,
+        has_more,
+    })
+}
+
 fn delete_publish_record(
     state: &ServerState,
     request: &HttpRequest,
     publish_id: &str,
 ) -> HttpResponse {
-    let _store_guard = state
-        .publish_store_lock
-        .lock()
-        .expect("publish store mutex poisoned");
-    let mut records = match load_publish_records(state) {
-        Ok(records) => records,
-        Err(error) => {
-            return error_response(
-                500,
-                "storage_unavailable",
-                format!("Could not read publish store: {error}"),
-                true,
-            )
-        }
-    };
-    let Some(index) = records
-        .iter()
-        .position(|entry| entry.object.id == publish_id && !entry.deleted)
-    else {
-        return error_response(404, "not_found", "Publish record not found.", false);
-    };
-
     let signature = match request_signature_from_headers(request) {
         Ok(signature) => signature,
         Err(error) => {
@@ -805,24 +1594,31 @@ fn delete_publish_record(
     if let Some(response) = validate_request_auth_controls(state, &signature) {
         return response;
     }
-    if signature.peer_id != records[index].object.payload.peer_id {
-        return error_response(
-            403,
-            "invalid_peer_id",
-            "Delete request signer does not own publish record.",
-            false,
-        );
-    }
 
-    records[index].deleted = true;
-    records[index].deleted_at = Some(Utc::now());
-    if let Err(error) = save_publish_records(state, &records) {
-        return error_response(
-            500,
-            "storage_unavailable",
-            format!("Could not write publish store: {error}"),
-            true,
-        );
+    match state
+        .publish_store
+        .mark_author_deleted(publish_id, &signature.peer_id)
+    {
+        Ok(PublishDeleteStatus::Deleted) => {}
+        Ok(PublishDeleteStatus::NotFound) => {
+            return error_response(404, "not_found", "Publish record not found.", false)
+        }
+        Ok(PublishDeleteStatus::WrongPeer) => {
+            return error_response(
+                403,
+                "invalid_peer_id",
+                "Delete request signer does not own publish record.",
+                false,
+            )
+        }
+        Err(error) => {
+            return error_response(
+                500,
+                "storage_unavailable",
+                format!("Could not write publish store: {error}"),
+                true,
+            )
+        }
     }
 
     json_response(200, json!({ "deleted": true, "id": publish_id }))
@@ -1219,24 +2015,6 @@ GET /v1/publish/search?limit=50&amp;cursor=...</pre>
     response(200, "text/html; charset=utf-8", body.as_bytes().to_vec())
 }
 
-fn load_publish_records(state: &ServerState) -> Result<Vec<StoredPublishRecord>> {
-    let path = state.publish_store_path();
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-    serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
-}
-
-fn save_publish_records(state: &ServerState, records: &[StoredPublishRecord]) -> Result<()> {
-    let path = state.publish_store_path();
-    let temp_path = path.with_file_name("publish_records.json.tmp");
-    let bytes = serde_json::to_vec_pretty(records)?;
-    std::fs::write(&temp_path, bytes).with_context(|| format!("write {}", temp_path.display()))?;
-    std::fs::rename(&temp_path, &path)
-        .with_context(|| format!("rename {} to {}", temp_path.display(), path.display()))
-}
-
 fn handle_connection(mut stream: TcpStream, state: &ServerState) -> Result<()> {
     stream.set_read_timeout(Some(REQUEST_READ_TIMEOUT))?;
     stream.set_write_timeout(Some(REQUEST_READ_TIMEOUT))?;
@@ -1437,6 +2215,10 @@ fn env_usize(name: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aichan_core::derive_peer_id;
+    use aichan_core::protocol::{CapabilitySet, UnsignedProtocolObject};
+    use chrono::TimeZone;
+    use ed25519_dalek::SigningKey;
 
     #[test]
     fn connection_limiter_rejects_after_limit_and_releases_on_drop() {
@@ -1447,5 +2229,142 @@ mod tests {
 
         drop(first);
         assert!(limiter.try_acquire().is_some());
+    }
+
+    #[test]
+    fn firestore_publish_document_round_trips_protocol_object_and_query_fields() {
+        let record = firestore_test_record(
+            "pub_firestore_001",
+            "old-school public directory over durable storage",
+        );
+        let name =
+            "projects/aichan-test/databases/(default)/documents/publish_records/pub_firestore_001";
+
+        let document = firestore_document_from_record(name, &record).unwrap();
+        let fields = document["fields"].as_object().unwrap();
+
+        assert_eq!(
+            fields.get("id").unwrap(),
+            &json!({ "stringValue": "pub_firestore_001" })
+        );
+        assert_eq!(
+            fields.get("deleted").unwrap(),
+            &json!({ "booleanValue": false })
+        );
+        assert_eq!(
+            fields.get("hidden").unwrap(),
+            &json!({ "booleanValue": false })
+        );
+        assert_eq!(
+            fields["tags"]["arrayValue"]["values"][0],
+            json!({ "stringValue": "coding" })
+        );
+        assert!(fields["object_json"]["stringValue"]
+            .as_str()
+            .unwrap()
+            .contains("old-school public directory"));
+
+        let parsed = stored_record_from_firestore_document(&document).unwrap();
+        assert_eq!(parsed.object.id, record.object.id);
+        assert_eq!(parsed.object.payload.peer_id, record.object.payload.peer_id);
+        assert_eq!(parsed.object.payload.body, record.object.payload.body);
+        assert!(!parsed.deleted);
+        assert!(parsed.deleted_at.is_none());
+    }
+
+    #[test]
+    fn firestore_search_query_matches_publish_api_pagination_shape() {
+        let cursor = PublishSearchCursor {
+            created_at: Utc.with_ymd_and_hms(2026, 5, 12, 1, 2, 3).unwrap(),
+            id: "pub_firestore_001".to_string(),
+            seen: 2,
+        };
+
+        let query = firestore_search_query_body(Some("coding"), 3, Some(&cursor));
+        let structured = &query["structuredQuery"];
+
+        assert_eq!(
+            structured["from"],
+            json!([{ "collectionId": "publish_records" }])
+        );
+        assert_eq!(
+            structured["orderBy"],
+            json!([
+                { "field": { "fieldPath": "created_at" }, "direction": "DESCENDING" },
+                { "field": { "fieldPath": "id" }, "direction": "DESCENDING" }
+            ])
+        );
+        assert_eq!(structured["limit"], 4);
+        assert_eq!(
+            structured["startAt"],
+            json!({
+                "values": [
+                    { "timestampValue": cursor.created_at.to_rfc3339_opts(SecondsFormat::Millis, true) },
+                    { "stringValue": "pub_firestore_001" }
+                ],
+                "before": false
+            })
+        );
+
+        let filters = structured["where"]["compositeFilter"]["filters"]
+            .as_array()
+            .unwrap();
+        assert_eq!(filters.len(), 3);
+        assert!(filters.iter().any(|filter| {
+            filter
+                == &json!({
+                    "fieldFilter": {
+                        "field": { "fieldPath": "deleted" },
+                        "op": "EQUAL",
+                        "value": { "booleanValue": false }
+                    }
+                })
+        }));
+        assert!(filters.iter().any(|filter| {
+            filter
+                == &json!({
+                    "fieldFilter": {
+                        "field": { "fieldPath": "hidden" },
+                        "op": "EQUAL",
+                        "value": { "booleanValue": false }
+                    }
+                })
+        }));
+        assert!(filters.iter().any(|filter| {
+            filter
+                == &json!({
+                    "fieldFilter": {
+                        "field": { "fieldPath": "tags" },
+                        "op": "ARRAY_CONTAINS",
+                        "value": { "stringValue": "coding" }
+                    }
+                })
+        }));
+    }
+
+    fn firestore_test_record(publish_id: &str, body: &str) -> StoredPublishRecord {
+        let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+        let public_key = URL_SAFE_NO_PAD.encode(signing_key.verifying_key().to_bytes());
+        let peer_id = derive_peer_id(&signing_key.verifying_key().to_bytes());
+        let created_at = Utc.with_ymd_and_hms(2026, 5, 12, 1, 2, 3).unwrap();
+        let payload = PublishRecordPayload {
+            peer_id,
+            public_key,
+            tags: vec!["coding".to_string(), "agent-friends".to_string()],
+            contact_policy: "encrypted_messages".to_string(),
+            capabilities: CapabilitySet::default(),
+            body: body.to_string(),
+            updated_at: created_at,
+        };
+        let object = UnsignedProtocolObject::new("publish.record", publish_id, created_at, payload)
+            .sign(&signing_key)
+            .unwrap();
+
+        StoredPublishRecord {
+            object,
+            deleted: false,
+            hidden: false,
+            deleted_at: None,
+        }
     }
 }
