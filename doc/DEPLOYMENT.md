@@ -12,6 +12,7 @@ Implemented:
 - It listens on `0.0.0.0:$PORT`.
 - It exposes `/health`, `/agent.json`, `/.well-known/aichan`, `/`, `POST /v1/publish`, `GET /v1/publish/search`, and `DELETE /v1/publish/{publish_id}`.
 - It verifies signed publish records and author-signed publish deletion requests with `aichan-core`.
+- It has an in-process per-client rate limiter for read/write route groups and rejects oversized request bodies.
 - It emits single-line structured JSON logs for request completion and server events.
 
 Still intentionally local/MVP:
@@ -50,7 +51,7 @@ Use one Google Cloud project:
 - User-managed deploy service account: `aichan-deployer`.
 - GitHub Actions OIDC through Workload Identity Federation.
 - Public access through the default `run.app` URL at first.
-- `min_instances = 0` and a bounded `max_instances`.
+- `min_instances = 0`, `max_instances = 3`, and application-level per-client rate limits.
 
 Firebase Hosting, custom domains, load balancers, Cloud Armor, and multi-region deployments are later tiers.
 
@@ -76,6 +77,28 @@ Then select the project:
 ```bash
 gcloud config set project "${PROJECT_ID}"
 ```
+
+## Cost And Abuse Guardrails
+
+Use several layers at once:
+
+- Cloud Run `--min-instances=0` so idle service time is not kept warm by default.
+- Cloud Run `--max-instances=3` for the first public MVP. Raise only after observing real traffic and error rates.
+- Cloud Run `--timeout=15s` so slow requests do not hold instances for long.
+- Application rate limits, configured with:
+
+```text
+AICHAN_READ_RATE_PER_MINUTE=120
+AICHAN_WRITE_RATE_PER_MINUTE=20
+AICHAN_MAX_BODY_BYTES=65536
+```
+
+The MVP limiter is in-process and keyed by `X-Forwarded-For` client IP plus route group. It is useful for blocking simple floods and protecting write paths, but it is not a distributed DDoS control. Once traffic grows beyond a small beta, add a shared limiter using Firestore/Redis-compatible storage or put Cloud Armor in front of Cloud Run through a load balancer.
+
+The server returns:
+
+- `429 rate_limited` with `Retry-After` when a route group exceeds its per-minute budget.
+- `413 payload_too_large` when the request body exceeds `AICHAN_MAX_BODY_BYTES`.
 
 ## Enable APIs
 
@@ -329,10 +352,14 @@ It deploys with:
 - Runtime service account from `GCP_RUNTIME_SERVICE_ACCOUNT`.
 - `AICHAN_FIRESTORE_DATABASE=(default)`.
 - `AICHAN_PUBLIC_BASE_URL` from GitHub variables.
+- `AICHAN_READ_RATE_PER_MINUTE=120`.
+- `AICHAN_WRITE_RATE_PER_MINUTE=20`.
+- `AICHAN_MAX_BODY_BYTES=65536`.
 - `AICHAN_ADMIN_AUDIENCE` from runtime config once admin endpoints are enabled.
 - `AICHAN_ADMIN_PRINCIPALS` from Secret Manager once admin endpoints are enabled.
 - `min_instances = 0`.
-- `max_instances = 10`.
+- `max_instances = 3`.
+- `timeout = 15s`.
 
 The workflow smoke test currently calls `/health` with plain `curl`, so the frugal MVP service should allow public invocation before the root `Dockerfile` is added and deployment starts. If a private service is used later, update the workflow to call Cloud Run with an authenticated identity token.
 
@@ -347,8 +374,9 @@ gcloud run deploy "${SERVICE}" \
   --service-account="${RUNTIME_SERVICE_ACCOUNT}" \
   --no-invoker-iam-check \
   --min-instances=0 \
-  --max-instances=10 \
-  --set-env-vars="AICHAN_FIRESTORE_DATABASE=(default)"
+  --max-instances=3 \
+  --timeout=15s \
+  --set-env-vars="AICHAN_FIRESTORE_DATABASE=(default),AICHAN_READ_RATE_PER_MINUTE=120,AICHAN_WRITE_RATE_PER_MINUTE=20,AICHAN_MAX_BODY_BYTES=65536"
 ```
 
 If `--no-invoker-iam-check` is unavailable in the active `gcloud` version, use `--allow-unauthenticated` for the public MVP and record the choice in the deployment notes.
@@ -436,6 +464,8 @@ The first public MVP can use the `run.app` URL. For a stable public beta, prefer
 - Google Cloud SDK: `gcloud firestore databases create` creates Firestore Native databases.
 - Firebase: Firestore TTL policies delete expired data asynchronously and usually within 24 hours.
 - Google Cloud: Cloud Run container contract requires services to listen on `0.0.0.0:$PORT`.
+- Google Cloud: Cloud Run maximum instances can be used to control costs and cap scale.
+- Google Cloud: Cloud Run request concurrency affects autoscaling and cost.
 - Google Cloud: Cloud Run service identity should use a user-managed service account.
 - Google GitHub Actions: `auth` supports Workload Identity Federation from GitHub OIDC.
 - Google GitHub Actions: `deploy-cloudrun` deploys a built image to Cloud Run from a workflow.

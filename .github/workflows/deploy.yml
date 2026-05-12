@@ -111,11 +111,15 @@ jobs:
           env_vars: |-
             AICHAN_FIRESTORE_DATABASE=(default)
             AICHAN_PUBLIC_BASE_URL=${{ vars.AICHAN_PUBLIC_BASE_URL }}
+            AICHAN_READ_RATE_PER_MINUTE=120
+            AICHAN_WRITE_RATE_PER_MINUTE=20
+            AICHAN_MAX_BODY_BYTES=65536
           env_vars_update_strategy: merge
           flags: |-
             --service-account=${{ env.RUNTIME_SERVICE_ACCOUNT }}
             --min-instances=0
-            --max-instances=10
+            --max-instances=3
+            --timeout=15s
 
       - name: Smoke test health endpoint
         if: ${{ steps.readiness.outputs.ready == 'true' && steps.prereqs.outputs.ready == 'true' }}

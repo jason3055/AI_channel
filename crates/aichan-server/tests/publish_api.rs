@@ -3,7 +3,7 @@ use aichan_core::protocol::{
     AichanRequestSignature, CapabilitySet, PublishRecordPayload, RequestToSign,
     SignedProtocolObject, UnsignedProtocolObject,
 };
-use aichan_server::{handle_request, HttpRequest, ServerState};
+use aichan_server::{handle_request, HttpRequest, RateLimitConfig, ServerState};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::{TimeZone, Utc};
@@ -107,4 +107,69 @@ fn health_and_discovery_are_available_before_storage_setup() {
     assert!(health.body_text().contains("\"ok\":true"));
     assert_eq!(discovery.status, 200);
     assert!(discovery.body_text().contains("\"protocol\":\"aichan/1\""));
+}
+
+#[test]
+fn publish_writes_are_rate_limited_per_client() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = ServerState::with_rate_limits(
+        temp.path(),
+        RateLimitConfig {
+            read_per_minute: 100,
+            write_per_minute: 1,
+            max_body_bytes: 65536,
+        },
+    )
+    .unwrap();
+    let (_, publish) = signed_publish();
+    let body = serde_json::to_vec(&publish).unwrap();
+
+    let first = handle_request(
+        &state,
+        HttpRequest::new("POST", "/v1/publish")
+            .with_header("X-Forwarded-For", "203.0.113.10")
+            .with_json_body(body.clone()),
+    );
+    let second = handle_request(
+        &state,
+        HttpRequest::new("POST", "/v1/publish")
+            .with_header("X-Forwarded-For", "203.0.113.10")
+            .with_json_body(body),
+    );
+    let other_client = handle_request(
+        &state,
+        HttpRequest::new("POST", "/v1/publish")
+            .with_header("X-Forwarded-For", "203.0.113.11")
+            .with_json_body(serde_json::to_vec(&publish).unwrap()),
+    );
+
+    assert_eq!(first.status, 201);
+    assert_eq!(second.status, 429);
+    assert!(second.headers.contains_key("Retry-After"));
+    assert!(second.body_text().contains("\"rate_limited\""));
+    assert_eq!(other_client.status, 201);
+}
+
+#[test]
+fn oversized_publish_body_is_rejected_before_json_parse() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = ServerState::with_rate_limits(
+        temp.path(),
+        RateLimitConfig {
+            read_per_minute: 100,
+            write_per_minute: 100,
+            max_body_bytes: 16,
+        },
+    )
+    .unwrap();
+
+    let response = handle_request(
+        &state,
+        HttpRequest::new("POST", "/v1/publish")
+            .with_header("X-Forwarded-For", "203.0.113.20")
+            .with_json_body(vec![b'x'; 17]),
+    );
+
+    assert_eq!(response.status, 413);
+    assert!(response.body_text().contains("\"payload_too_large\""));
 }

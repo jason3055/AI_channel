@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use aichan_core::identity::PeerId;
 use aichan_core::protocol::{
@@ -18,6 +19,7 @@ use serde_json::json;
 pub struct ServerState {
     data_dir: Arc<PathBuf>,
     public_base_url: Arc<String>,
+    rate_limiter: Arc<RateLimiter>,
 }
 
 impl ServerState {
@@ -29,19 +31,176 @@ impl ServerState {
         data_dir: impl AsRef<Path>,
         public_base_url: impl Into<String>,
     ) -> Result<Self> {
+        Self::with_public_base_url_and_rate_limits(
+            data_dir,
+            public_base_url,
+            RateLimitConfig::default(),
+        )
+    }
+
+    pub fn with_rate_limits(
+        data_dir: impl AsRef<Path>,
+        rate_limits: RateLimitConfig,
+    ) -> Result<Self> {
+        Self::with_public_base_url_and_rate_limits(data_dir, "http://localhost:8080", rate_limits)
+    }
+
+    pub fn with_public_base_url_and_rate_limits(
+        data_dir: impl AsRef<Path>,
+        public_base_url: impl Into<String>,
+        rate_limits: RateLimitConfig,
+    ) -> Result<Self> {
         let data_dir = data_dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&data_dir)
             .with_context(|| format!("create data dir {}", data_dir.display()))?;
         Ok(Self {
             data_dir: Arc::new(data_dir),
             public_base_url: Arc::new(public_base_url.into()),
+            rate_limiter: Arc::new(RateLimiter::new(rate_limits)),
         })
     }
 
     fn publish_store_path(&self) -> PathBuf {
         self.data_dir.join("publish_records.json")
     }
+
+    fn rate_limits(&self) -> RateLimitConfig {
+        self.rate_limiter.config
+    }
+
+    fn check_rate_limit(&self, request: &HttpRequest) -> Option<RateLimitExceeded> {
+        let class = RateLimitClass::for_request(request)?;
+        self.rate_limiter.check(
+            RateLimitKey {
+                client: request.client_key(),
+                class,
+            },
+            class.limit(self.rate_limiter.config),
+        )
+    }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RateLimitConfig {
+    pub read_per_minute: u32,
+    pub write_per_minute: u32,
+    pub max_body_bytes: usize,
+}
+
+impl RateLimitConfig {
+    fn from_env() -> Self {
+        Self {
+            read_per_minute: env_u32("AICHAN_READ_RATE_PER_MINUTE")
+                .unwrap_or_else(|| Self::default().read_per_minute)
+                .max(1),
+            write_per_minute: env_u32("AICHAN_WRITE_RATE_PER_MINUTE")
+                .unwrap_or_else(|| Self::default().write_per_minute)
+                .max(1),
+            max_body_bytes: env_usize("AICHAN_MAX_BODY_BYTES")
+                .unwrap_or_else(|| Self::default().max_body_bytes)
+                .max(1024),
+        }
+    }
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            read_per_minute: 120,
+            write_per_minute: 20,
+            max_body_bytes: 65_536,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RateLimiter {
+    config: RateLimitConfig,
+    buckets: Mutex<BTreeMap<RateLimitKey, RateLimitBucket>>,
+}
+
+impl RateLimiter {
+    fn new(config: RateLimitConfig) -> Self {
+        Self {
+            config,
+            buckets: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn check(&self, key: RateLimitKey, limit: u32) -> Option<RateLimitExceeded> {
+        let now = Instant::now();
+        let mut buckets = self.buckets.lock().expect("rate limiter mutex poisoned");
+        let bucket = buckets.entry(key.clone()).or_insert(RateLimitBucket {
+            window_start: now,
+            count: 0,
+        });
+
+        if now.duration_since(bucket.window_start) >= RATE_LIMIT_WINDOW {
+            bucket.window_start = now;
+            bucket.count = 0;
+        }
+
+        if bucket.count >= limit {
+            let retry_after = RATE_LIMIT_WINDOW
+                .saturating_sub(now.duration_since(bucket.window_start))
+                .as_secs()
+                .max(1);
+            return Some(RateLimitExceeded {
+                key,
+                retry_after_seconds: retry_after,
+            });
+        }
+
+        bucket.count += 1;
+        None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct RateLimitKey {
+    client: String,
+    class: RateLimitClass,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RateLimitClass {
+    Read,
+    Write,
+}
+
+impl RateLimitClass {
+    fn for_request(request: &HttpRequest) -> Option<Self> {
+        if request.path() == "/health" {
+            return None;
+        }
+        match request.method.as_str() {
+            "GET" => Some(Self::Read),
+            "POST" | "PUT" | "PATCH" | "DELETE" => Some(Self::Write),
+            _ => Some(Self::Read),
+        }
+    }
+
+    fn limit(self, config: RateLimitConfig) -> u32 {
+        match self {
+            Self::Read => config.read_per_minute,
+            Self::Write => config.write_per_minute,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RateLimitBucket {
+    window_start: Instant,
+    count: u32,
+}
+
+#[derive(Debug, Clone)]
+struct RateLimitExceeded {
+    key: RateLimitKey,
+    retry_after_seconds: u64,
+}
+
+const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 pub struct HttpRequest {
@@ -92,6 +251,16 @@ impl HttpRequest {
     fn query(&self) -> Option<&str> {
         self.path_and_query.split_once('?').map(|(_, query)| query)
     }
+
+    fn client_key(&self) -> String {
+        self.header("X-Forwarded-For")
+            .and_then(|value| value.split(',').next())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| self.header("X-Real-IP"))
+            .unwrap_or("unknown")
+            .to_string()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -120,7 +289,11 @@ pub fn run_from_env() -> Result<()> {
     let data_dir = env_non_empty("AICHAN_DATA_DIR").unwrap_or_else(|| "/tmp/aichan-server".into());
     let public_base_url =
         env_non_empty("AICHAN_PUBLIC_BASE_URL").unwrap_or_else(|| format!("http://{addr}"));
-    let state = ServerState::with_public_base_url(data_dir, public_base_url)?;
+    let state = ServerState::with_public_base_url_and_rate_limits(
+        data_dir,
+        public_base_url,
+        RateLimitConfig::from_env(),
+    )?;
 
     run(&addr, state)
 }
@@ -152,6 +325,27 @@ pub fn run(addr: &str, state: ServerState) -> Result<()> {
 }
 
 pub fn handle_request(state: &ServerState, request: HttpRequest) -> HttpResponse {
+    if request.body.len() > state.rate_limits().max_body_bytes {
+        return error_response(
+            413,
+            "payload_too_large",
+            "Request body exceeds the configured maximum size.",
+            false,
+        );
+    }
+
+    if let Some(limited) = state.check_rate_limit(&request) {
+        log_event(
+            "rate_limit.exceeded",
+            json!({
+                "class": format!("{:?}", limited.key.class).to_ascii_lowercase(),
+                "path": request.path(),
+                "retry_after_seconds": limited.retry_after_seconds
+            }),
+        );
+        return rate_limited_response(limited.retry_after_seconds);
+    }
+
     let response = match (request.method.as_str(), request.path()) {
         ("GET", "/health") => json_response(200, json!({ "ok": true, "service": "aichan-server" })),
         ("GET", "/agent.json") | ("GET", "/.well-known/aichan") => discovery_response(state),
@@ -420,7 +614,10 @@ fn discovery_response(state: &ServerState) -> HttpResponse {
             "limits": {
                 "max_message_ttl_seconds": 604800,
                 "max_message_bytes": 65536,
-                "max_publish_body_bytes": 8192
+                "max_publish_body_bytes": 8192,
+                "max_body_bytes": state.rate_limits().max_body_bytes,
+                "read_per_minute": state.rate_limits().read_per_minute,
+                "write_per_minute": state.rate_limits().write_per_minute
             },
             "extensions": []
         }),
@@ -472,12 +669,24 @@ fn save_publish_records(state: &ServerState, records: &[StoredPublishRecord]) ->
 }
 
 fn handle_connection(mut stream: TcpStream, state: &ServerState) -> Result<()> {
-    let request = read_http_request(&mut stream)?;
-    let response = handle_request(state, request);
+    let response = match read_http_request(&mut stream, state.rate_limits().max_body_bytes)? {
+        ReadHttpRequest::Request(request) => handle_request(state, request),
+        ReadHttpRequest::PayloadTooLarge => error_response(
+            413,
+            "payload_too_large",
+            "Request body exceeds the configured maximum size.",
+            false,
+        ),
+    };
     write_http_response(stream, response)
 }
 
-fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
+enum ReadHttpRequest {
+    Request(HttpRequest),
+    PayloadTooLarge,
+}
+
+fn read_http_request(stream: &mut TcpStream, max_body_bytes: usize) -> Result<ReadHttpRequest> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
@@ -502,13 +711,16 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
         .header("Content-Length")
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0);
+    if content_length > max_body_bytes {
+        return Ok(ReadHttpRequest::PayloadTooLarge);
+    }
     if content_length > 0 {
         let mut body = vec![0_u8; content_length];
         reader.read_exact(&mut body)?;
         request.body = body;
     }
 
-    Ok(request)
+    Ok(ReadHttpRequest::Request(request))
 }
 
 fn write_http_response(mut stream: TcpStream, response: HttpResponse) -> Result<()> {
@@ -520,6 +732,8 @@ fn write_http_response(mut stream: TcpStream, response: HttpResponse) -> Result<
         403 => "Forbidden",
         404 => "Not Found",
         409 => "Conflict",
+        413 => "Payload Too Large",
+        429 => "Too Many Requests",
         500 => "Internal Server Error",
         _ => "OK",
     };
@@ -600,6 +814,19 @@ fn error_response(
     )
 }
 
+fn rate_limited_response(retry_after_seconds: u64) -> HttpResponse {
+    let mut response = error_response(
+        429,
+        "rate_limited",
+        "Too many requests. Please retry after the indicated delay.",
+        true,
+    );
+    response
+        .headers
+        .insert("Retry-After".to_string(), retry_after_seconds.to_string());
+    response
+}
+
 fn response(status: u16, content_type: &str, body: Vec<u8>) -> HttpResponse {
     let mut headers = BTreeMap::new();
     headers.insert("Content-Type".to_string(), content_type.to_string());
@@ -633,4 +860,12 @@ fn log_event(name: &str, fields: serde_json::Value) {
 
 fn env_non_empty(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+fn env_u32(name: &str) -> Option<u32> {
+    env_non_empty(name).and_then(|value| value.parse().ok())
+}
+
+fn env_usize(name: &str) -> Option<usize> {
+    env_non_empty(name).and_then(|value| value.parse().ok())
 }
