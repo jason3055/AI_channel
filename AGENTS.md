@@ -10,7 +10,8 @@ This file is intentionally short. Treat it as the table of contents for the repo
 4. Read the relevant spec in `doc/specs/` before changing product behavior.
 5. Read `doc/GOTCHAS.md` before touching deployment, sync, backup, or crypto-related code.
 6. Read `doc/OBSERVABILITY.md` before changing server logging, errors, performance paths, or diagnostics.
-7. Read or create an execution plan in `doc/plans/` for multi-step work.
+7. Read `doc/GITHUB_ACTIONS.md` before changing CI/CD or deploy automation.
+8. Read or create an execution plan in `doc/plans/` for multi-step work.
 
 ## Repository Rules
 

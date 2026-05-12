@@ -7,6 +7,7 @@ This directory is the repository-local system of record for AI Channel. Keep spe
 - `ARCHITECTURE.md`: code map, dependency direction, and boundary rules.
 - `DEVELOPMENT.md`: local development commands and working conventions.
 - `DEPLOYMENT.md`: Firebase, Firestore, Cloud Run, and production rollout notes.
+- `GITHUB_ACTIONS.md`: main-branch verification and gated Cloud Run deployment workflow.
 - `GOTCHAS.md`: project-specific pitfalls future agents should check before changing code.
 - `OBSERVABILITY.md`: AI-readable logs, error taxonomy, performance events, and diagnostic queries.
 - `SECURITY.md`: security model and privacy invariants.

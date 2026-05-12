@@ -12,6 +12,9 @@ These notes summarize official deployment references used by `doc/DEPLOYMENT.md`
 - [Cloud Run container runtime contract](https://cloud.google.com/run/docs/container-contract): services must listen on `0.0.0.0` and use the injected `PORT` environment variable.
 - [Cloud Run service identity](https://cloud.google.com/run/docs/securing/service-identity): prefer a user-managed service account and avoid `GOOGLE_APPLICATION_CREDENTIALS` on Cloud Run.
 - [Configure service identity for services](https://cloud.google.com/run/docs/configuring/services/service-identity): attach a service account to a Cloud Run service.
+- [Workload Identity Federation from GitHub Actions](https://github.com/google-github-actions/auth): GitHub Actions can authenticate to Google Cloud through OIDC without long-lived service account keys.
+- [Deploy to Cloud Run from GitHub Actions](https://github.com/google-github-actions/deploy-cloudrun): deploys a built image or source directory to Cloud Run from a workflow.
+- [Set up gcloud in GitHub Actions](https://github.com/google-github-actions/setup-gcloud): installs and configures the Google Cloud CLI in a workflow.
 - [Firestore server client library security](https://cloud.google.com/firestore/docs/security/iam): server access is secured by IAM and Firestore roles such as `roles/datastore.user`.
 - [Firestore SDKs and client libraries](https://firebase.google.com/docs/firestore/client/libraries): server client libraries use privileged environments and are not evaluated against Security Rules.
 - [Build and push a Docker image with Cloud Build](https://cloud.google.com/build/docs/build-push-docker-image): build a Dockerfile and push the resulting image to Artifact Registry.
@@ -26,5 +29,6 @@ These notes summarize official deployment references used by `doc/DEPLOYMENT.md`
 - Use Cloud Run as the public HTTP surface.
 - Use Firebase Hosting only as an optional front door later.
 - Use server-side IAM instead of Firebase client SDK access.
+- Use GitHub Actions OIDC and Workload Identity Federation instead of service account JSON keys.
 - Use Firestore TTL as cleanup help, not as the only expiration check.
 - Keep the first deployment inexpensive: one region, `min_instances = 0`, bounded `max_instances`.

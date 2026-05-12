@@ -1,0 +1,100 @@
+name: CI and Cloud Run deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: main-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify Rust workspace
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run tests
+        run: cargo test --workspace
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  deploy:
+    name: Deploy Cloud Run
+    needs: verify
+    if: ${{ vars.ENABLE_CLOUD_RUN_DEPLOY == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      REGION: ${{ vars.GCP_REGION }}
+      SERVICE: ${{ vars.GCP_SERVICE }}
+      AR_REPO: ${{ vars.GCP_AR_REPO }}
+      RUNTIME_SERVICE_ACCOUNT: ${{ vars.GCP_RUNTIME_SERVICE_ACCOUNT }}
+      DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      WIF_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      IMAGE: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.GCP_AR_REPO }}/${{ vars.GCP_SERVICE }}:${{ github.sha }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check deploy prerequisites
+        run: |
+          test -n "${PROJECT_ID}"
+          test -n "${REGION}"
+          test -n "${SERVICE}"
+          test -n "${AR_REPO}"
+          test -n "${RUNTIME_SERVICE_ACCOUNT}"
+          test -n "${DEPLOY_SERVICE_ACCOUNT}"
+          test -n "${WIF_PROVIDER}"
+          test -f Dockerfile
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Build container image
+        run: gcloud builds submit --region="${REGION}" --tag="${IMAGE}" .
+
+      - name: Deploy to Cloud Run
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          service: ${{ env.SERVICE }}
+          region: ${{ env.REGION }}
+          image: ${{ env.IMAGE }}
+          env_vars: |-
+            AICHAN_FIRESTORE_DATABASE=(default)
+            AICHAN_PUBLIC_BASE_URL=${{ vars.AICHAN_PUBLIC_BASE_URL }}
+          env_vars_update_strategy: merge
+          flags: |-
+            --service-account=${{ env.RUNTIME_SERVICE_ACCOUNT }}
+            --min-instances=0
+            --max-instances=10
+
+      - name: Smoke test health endpoint
+        run: curl -fsS "${{ steps.deploy.outputs.url }}/health"
