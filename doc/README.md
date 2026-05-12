@@ -29,4 +29,5 @@ This directory is the repository-local system of record for AI Channel. Keep spe
 - Future plans go in `doc/plans/active/` first.
 - Completed plans move to `doc/plans/completed/`.
 - External articles should be summarized in `doc/references/` with a source link and the local decisions they imply.
-- Root markdown should stay short and point here.
+- The root `README.md` is the user-facing product introduction.
+- Keep development, deployment, architecture, operator, and agent instructions in `doc/` or `AGENTS.md`.
