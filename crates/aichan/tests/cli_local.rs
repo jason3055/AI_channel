@@ -77,3 +77,73 @@ fn init_agent_hints_writes_safe_files_and_gitignore_entries() {
     assert!(!agents.contains("private_key"));
     assert!(!readme.contains("private_key"));
 }
+
+#[test]
+fn init_agent_hints_preserves_existing_guidance_files() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(temp.path().join(".aichan")).unwrap();
+    std::fs::write(
+        temp.path().join("AGENTS.md"),
+        "# Existing agent rules\n\nKeep this project-specific guidance.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("CLAUDE.md"),
+        "# Existing Claude rules\n\nKeep these Claude-specific notes.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join(".aichan/README.md"),
+        "# Existing AI Channel notes\n\nKeep this local context.\n",
+    )
+    .unwrap();
+
+    let mut cmd = aichan();
+    cmd.current_dir(temp.path()).arg("init-agent-hints");
+    cmd.assert().success();
+
+    let agents = std::fs::read_to_string(temp.path().join("AGENTS.md")).unwrap();
+    let claude = std::fs::read_to_string(temp.path().join("CLAUDE.md")).unwrap();
+    let readme = std::fs::read_to_string(temp.path().join(".aichan/README.md")).unwrap();
+
+    assert!(agents.contains("Keep this project-specific guidance."));
+    assert!(agents.contains("<!-- BEGIN AICHAN -->"));
+    assert!(agents.contains("aichan inbox"));
+    assert!(claude.contains("Keep these Claude-specific notes."));
+    assert!(claude.contains("<!-- BEGIN AICHAN -->"));
+    assert!(claude.contains("AI Channel"));
+    assert!(readme.contains("Keep this local context."));
+    assert!(readme.contains("<!-- BEGIN AICHAN -->"));
+    assert!(readme.contains("No private keys are stored in this note."));
+}
+
+#[test]
+fn init_agent_hints_is_idempotent_for_blocks_and_gitignore() {
+    let temp = tempfile::tempdir().unwrap();
+
+    for _ in 0..2 {
+        let mut cmd = aichan();
+        cmd.current_dir(temp.path()).arg("init-agent-hints");
+        cmd.assert().success();
+    }
+
+    let agents = std::fs::read_to_string(temp.path().join("AGENTS.md")).unwrap();
+    let claude = std::fs::read_to_string(temp.path().join("CLAUDE.md")).unwrap();
+    let readme = std::fs::read_to_string(temp.path().join(".aichan/README.md")).unwrap();
+    let gitignore = std::fs::read_to_string(temp.path().join(".gitignore")).unwrap();
+
+    assert_eq!(agents.matches("<!-- BEGIN AICHAN -->").count(), 1);
+    assert_eq!(agents.matches("<!-- END AICHAN -->").count(), 1);
+    assert_eq!(claude.matches("<!-- BEGIN AICHAN -->").count(), 1);
+    assert_eq!(claude.matches("<!-- END AICHAN -->").count(), 1);
+    assert_eq!(readme.matches("<!-- BEGIN AICHAN -->").count(), 1);
+    assert_eq!(readme.matches("<!-- END AICHAN -->").count(), 1);
+
+    for entry in [
+        ".aichan/identity.json",
+        ".aichan/device.json",
+        ".aichan/memory.json",
+    ] {
+        assert_eq!(gitignore.lines().filter(|line| *line == entry).count(), 1);
+    }
+}

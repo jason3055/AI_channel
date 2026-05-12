@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use aichan_core::{AichanConfig, DeviceFile, IdentityFile, LocalStateDir, MemoryFile};
 use anyhow::Result;
@@ -70,21 +70,17 @@ fn init_agent_hints(state: &LocalStateDir) -> Result<()> {
     let readme_path = state.root().join("README.md");
     let gitignore_path = project_root.join(".gitignore");
 
-    let note = "AI Channel startup note\n\n\
+    let agents_note = "AI Channel startup note\n\n\
 If this project uses AI Channel, check local state with `aichan status`, \
 sync recent encrypted state with `aichan sync` when network use is appropriate, \
 and read messages with `aichan inbox` when relevant.\n\n\
 No private keys are stored in this note.\n";
+    let claude_note = "AI Channel\n\nUse the same safe startup workflow as AGENTS.md: `aichan status`, `aichan sync`, and `aichan inbox`.\n";
+    let readme_note = "AI Channel local state\n\nThis directory stores local identity, device, memory, and cache files. No private keys are stored in this note.\n";
 
-    std::fs::write(&agents_path, note)?;
-    std::fs::write(
-        &claude_path,
-        "AI Channel\n\nUse the same safe startup workflow as AGENTS.md: `aichan status`, `aichan sync`, and `aichan inbox`.\n",
-    )?;
-    std::fs::write(
-        &readme_path,
-        "AI Channel local state\n\nThis directory stores local identity, device, memory, and cache files. No private keys are stored in this note.\n",
-    )?;
+    write_marked_block(&agents_path, agents_note)?;
+    write_marked_block(&claude_path, claude_note)?;
+    write_marked_block(&readme_path, readme_note)?;
 
     let entries = [
         ".aichan/identity.json",
@@ -113,6 +109,41 @@ No private keys are stored in this note.\n";
     println!("wrote {}", claude_path.display());
     println!("wrote {}", readme_path.display());
     println!("updated {}", gitignore_path.display());
+    Ok(())
+}
+
+fn write_marked_block(path: &Path, body: &str) -> Result<()> {
+    const BEGIN: &str = "<!-- BEGIN AICHAN -->";
+    const END: &str = "<!-- END AICHAN -->";
+
+    let block = format!("{BEGIN}\n{body}{END}\n");
+    let existing = if path.exists() {
+        std::fs::read_to_string(path)?
+    } else {
+        String::new()
+    };
+
+    let updated =
+        if let (Some(begin_index), Some(end_index)) = (existing.find(BEGIN), existing.find(END)) {
+            let end_index = end_index + END.len();
+            let mut content = String::new();
+            content.push_str(&existing[..begin_index]);
+            content.push_str(&block);
+            content.push_str(existing[end_index..].trim_start_matches('\n'));
+            content
+        } else if existing.is_empty() {
+            block
+        } else {
+            let mut content = existing;
+            if !content.ends_with('\n') {
+                content.push('\n');
+            }
+            content.push('\n');
+            content.push_str(&block);
+            content
+        };
+
+    std::fs::write(path, updated)?;
     Ok(())
 }
 
