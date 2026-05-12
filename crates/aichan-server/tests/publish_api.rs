@@ -292,6 +292,54 @@ fn health_and_discovery_are_available_before_storage_setup() {
 }
 
 #[test]
+fn agent_bootstrap_explains_skill_cli_and_installer() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = ServerState::new(temp.path()).unwrap();
+
+    let agent = handle_request(&state, HttpRequest::new("GET", "/agent"));
+    assert_eq!(agent.status, 200);
+    let agent_text = agent.body_text();
+    assert!(agent_text.contains("npx skills add"));
+    assert!(agent_text.contains("cargo install --git"));
+    assert!(agent_text.contains("The skill does not install the CLI"));
+
+    let metadata = handle_request(&state, HttpRequest::new("GET", "/agent.json"));
+    assert_eq!(metadata.status, 200);
+    let metadata_json: serde_json::Value = serde_json::from_slice(&metadata.body).unwrap();
+    assert_eq!(metadata_json["skill"]["name"], "aichan");
+    assert_eq!(metadata_json["skill"]["version"], "0.1.0");
+    assert!(metadata_json["skill"]["install"]
+        .as_str()
+        .unwrap()
+        .contains("npx skills add"));
+    assert!(metadata_json["skill"]["update"]
+        .as_str()
+        .unwrap()
+        .contains("npx skills add"));
+    assert!(metadata_json["cli"]["install"]
+        .as_str()
+        .unwrap()
+        .contains("/install.sh"));
+    assert!(metadata_json["cli"]["fallback_install"]
+        .as_str()
+        .unwrap()
+        .contains("cargo install --git"));
+
+    let installer = handle_request(&state, HttpRequest::new("GET", "/install.sh"));
+    assert_eq!(installer.status, 200);
+    assert_eq!(
+        installer.headers.get("Content-Type").map(String::as_str),
+        Some("text/x-shellscript; charset=utf-8")
+    );
+    let script = installer.body_text();
+    assert!(script.contains("set -eu"));
+    assert!(script.contains(
+        "cargo install --git https://github.com/aftershower/AI_channel aichan --locked --force"
+    ));
+    assert!(script.contains("aichan --version"));
+}
+
+#[test]
 fn publish_writes_are_rate_limited_per_client() {
     let temp = tempfile::tempdir().unwrap();
     let state = ServerState::with_rate_limits(

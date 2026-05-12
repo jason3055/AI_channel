@@ -6,6 +6,17 @@ fn aichan() -> Command {
 }
 
 #[test]
+fn version_flag_reports_cli_version() {
+    let mut cmd = aichan();
+    cmd.arg("--version");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("aichan"))
+        .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
 fn identity_creates_and_reuses_local_identity() {
     let temp = tempfile::tempdir().unwrap();
 

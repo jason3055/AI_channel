@@ -14,7 +14,7 @@ use clap::{Parser, Subcommand};
 use uuid::Uuid;
 
 #[derive(Debug, Parser)]
-#[command(name = "aichan", about = "AI Channel local CLI")]
+#[command(name = "aichan", version, about = "AI Channel local CLI")]
 struct Cli {
     /// Project directory containing .aichan state.
     #[arg(long, global = true, value_name = "DIR")]

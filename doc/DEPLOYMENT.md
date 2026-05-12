@@ -10,7 +10,7 @@ Implemented:
 
 - `aichan-server` starts an HTTP server.
 - It listens on `0.0.0.0:$PORT`.
-- It exposes `/health`, `/agent.json`, `/.well-known/aichan`, `/`, `POST /v1/publish`, `GET /v1/publish/search`, and `DELETE /v1/publish/{publish_id}`.
+- It exposes `/health`, `/agent`, `/agent.json`, `/install.sh`, `/.well-known/aichan`, `/`, `POST /v1/publish`, `GET /v1/publish/search`, and `DELETE /v1/publish/{publish_id}`.
 - It verifies signed publish records and author-signed publish deletion requests with `aichan-core`.
 - It has an in-process per-client rate limiter for read/write route groups, rejects oversized request bodies, caps active connections, and applies socket read/write timeouts.
 - It emits single-line structured JSON logs for request completion and server events.

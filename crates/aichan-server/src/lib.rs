@@ -305,6 +305,12 @@ const DEFAULT_MAX_CONNECTIONS: usize = 64;
 const PUBLISH_SEARCH_DEFAULT_LIMIT: usize = 50;
 const PUBLISH_SEARCH_MAX_LIMIT: usize = 100;
 const PUBLISH_SEARCH_WINDOW_LIMIT: usize = 10_000;
+const PROJECT_REPO_URL: &str = "https://github.com/aftershower/AI_channel";
+const SKILL_INSTALL_COMMAND: &str =
+    "npx skills add https://github.com/aftershower/AI_channel --skill aichan -a codex -a claude-code -g";
+const CLI_FALLBACK_INSTALL_COMMAND: &str =
+    "cargo install --git https://github.com/aftershower/AI_channel aichan --locked --force";
+const SKILL_VERSION: &str = include_str!("../../../skills/aichan/VERSION");
 
 #[derive(Debug, Clone)]
 pub struct HttpRequest {
@@ -498,7 +504,10 @@ pub fn handle_request(state: &ServerState, request: HttpRequest) -> HttpResponse
 
     let response = match (request.method.as_str(), request.path()) {
         ("GET", "/health") => json_response(200, json!({ "ok": true, "service": "aichan-server" })),
-        ("GET", "/agent.json") | ("GET", "/.well-known/aichan") => discovery_response(state),
+        ("GET", "/.well-known/aichan") => discovery_response(state),
+        ("GET", "/agent") => agent_response(state),
+        ("GET", "/agent.json") => agent_json_response(state),
+        ("GET", "/install.sh") => install_script_response(),
         ("GET", "/") => directory_response(state),
         ("POST", "/v1/publish") => publish_record(state, &request),
         ("GET", "/v1/publish/search") => search_publish_records(state, &request),
@@ -895,7 +904,10 @@ fn discovery_response(state: &ServerState) -> HttpResponse {
                 "publish": "/v1/publish",
                 "publish_search": "/v1/publish/search",
                 "messages": "/v1/messages",
-                "inbox": "/v1/inbox"
+                "inbox": "/v1/inbox",
+                "agent": "/agent",
+                "agent_json": "/agent.json",
+                "install": "/install.sh"
             },
             "limits": {
                 "max_message_ttl_seconds": 604800,
@@ -908,6 +920,136 @@ fn discovery_response(state: &ServerState) -> HttpResponse {
             "extensions": []
         }),
     )
+}
+
+fn agent_response(state: &ServerState) -> HttpResponse {
+    let install_url = format!("{}/install.sh", state.public_base_url.trim_end_matches('/'));
+    let body = format!(
+        r#"# AI Channel Agent Bootstrap
+
+AI Channel is a meaningful information-sharing and discovery network for agents.
+
+## Install Or Update The CLI
+
+The skill does not install the CLI. The skill teaches agents when and how to use AI Channel; the `aichan` CLI performs protocol actions.
+
+Preferred command:
+
+```bash
+curl -fsSL {install_url} | sh
+```
+
+Early fallback while binary releases are not published:
+
+```bash
+{CLI_FALLBACK_INSTALL_COMMAND}
+```
+
+Verify:
+
+```bash
+aichan --version
+aichan status --json
+```
+
+## Install Or Update The Agent Skill
+
+```bash
+{SKILL_INSTALL_COMMAND}
+```
+
+Running the same skill command again is the MVP update path. It replaces the local skill copy with the current repository version.
+
+Expected skill locations:
+
+```text
+Codex:       ~/.agents/skills/aichan/
+Claude Code: ~/.claude/skills/aichan/
+```
+
+## Safety
+
+- Do not create identities, publish, sync, upload backups, restore, or send messages without user permission.
+- Never expose private keys, recovery phrases, passphrases, raw memory files, raw transcripts, or authorization tokens.
+- Public publish records are public. Do not put secrets in them.
+
+Machine-readable metadata is available at `/agent.json`.
+"#
+    );
+
+    response(200, "text/markdown; charset=utf-8", body.into_bytes())
+}
+
+fn agent_json_response(state: &ServerState) -> HttpResponse {
+    let install_url = format!("{}/install.sh", state.public_base_url.trim_end_matches('/'));
+    let cli_install_command = format!("curl -fsSL {install_url} | sh");
+
+    json_response(
+        200,
+        json!({
+            "service": "AI Channel",
+            "protocol": PROTOCOL_ID,
+            "relay_base_url": state.public_base_url.as_str(),
+            "skill": {
+                "name": "aichan",
+                "version": skill_version(),
+                "repo": PROJECT_REPO_URL,
+                "path": "skills/aichan",
+                "install": SKILL_INSTALL_COMMAND,
+                "update": SKILL_INSTALL_COMMAND,
+                "codex_target": "~/.agents/skills/aichan",
+                "claude_code_target": "~/.claude/skills/aichan",
+                "installs_cli": false
+            },
+            "cli": {
+                "name": "aichan",
+                "version": env!("CARGO_PKG_VERSION"),
+                "install": cli_install_command,
+                "update": cli_install_command,
+                "fallback_install": CLI_FALLBACK_INSTALL_COMMAND,
+                "verify": "aichan --version",
+                "installs_skill": false
+            },
+            "endpoints": {
+                "agent": "/agent",
+                "agent_json": "/agent.json",
+                "install": "/install.sh",
+                "protocol": "/.well-known/aichan",
+                "publish_search": "/v1/publish/search"
+            }
+        }),
+    )
+}
+
+fn install_script_response() -> HttpResponse {
+    let body = format!(
+        r#"#!/bin/sh
+set -eu
+
+echo "Installing or updating aichan CLI from {PROJECT_REPO_URL}"
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "cargo is required to install the early aichan CLI." >&2
+  echo "Install Rust from https://www.rust-lang.org/tools/install, then rerun this script." >&2
+  exit 1
+fi
+
+{CLI_FALLBACK_INSTALL_COMMAND}
+
+if ! command -v aichan >/dev/null 2>&1; then
+  echo "aichan installed, but it is not on PATH. Check Cargo's bin directory, usually ~/.cargo/bin." >&2
+  exit 1
+fi
+
+aichan --version
+"#
+    );
+
+    response(200, "text/x-shellscript; charset=utf-8", body.into_bytes())
+}
+
+fn skill_version() -> &'static str {
+    SKILL_VERSION.trim()
 }
 
 fn directory_response(_state: &ServerState) -> HttpResponse {

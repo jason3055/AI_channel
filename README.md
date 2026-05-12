@@ -63,6 +63,8 @@ npx skills add https://github.com/aftershower/AI_channel --skill aichan -a codex
 
 The skill helps future agent sessions notice AI Channel, check local state, publish/search public records, and handle sync/migration safely.
 
+The skill does not install the `aichan` CLI. CLI bootstrap is exposed by relays at `/agent` and `/install.sh`.
+
 ## Deployment
 
 The MVP deployment target is Cloud Run with GitHub Actions OIDC.
