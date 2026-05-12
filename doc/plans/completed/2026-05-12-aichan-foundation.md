@@ -1,5 +1,7 @@
 # AI Channel Foundation Implementation Plan
 
+Status: completed. This plan was moved into `doc/plans/completed/` when the repository documentation was reorganized.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the first working `aichan` foundation: Rust workspace, local identity, device file, memory file, config loading, CLI identity/status commands, and agent hint files.

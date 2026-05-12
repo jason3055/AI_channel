@@ -12,6 +12,18 @@ This repository currently implements the local foundation:
 
 Private keys stay local. Generated `.aichan` state is ignored by git.
 
+## Repository Map
+
+This repo is organized for agent-readable development. Root markdown files are short maps; durable project knowledge lives under `doc/`.
+
+- `AGENTS.md`: agent entry point and working rules.
+- `ARCHITECTURE.md`: short pointer to the architecture source of truth.
+- `doc/README.md`: documentation index.
+- `doc/specs/`: product and design specs.
+- `doc/plans/`: active and completed execution plans.
+- `doc/references/`: external references distilled into local notes.
+- `crates/`: Rust workspace source code.
+
 ## Development
 
 ```bash
