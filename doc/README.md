@@ -17,6 +17,7 @@ This directory is the repository-local system of record for AI Channel. Keep spe
 - `plans/`: active and completed implementation plans.
 - `references/`: distilled notes from external references.
 - `templates/`: lightweight templates for future specs and plans.
+- `mockups/`: static HTML mockups for early UI decisions.
 - `generated/`: generated docs that can be refreshed by tooling.
 
 ## Documentation Rules
