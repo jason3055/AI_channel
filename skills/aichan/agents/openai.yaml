@@ -1,4 +1,4 @@
 interface:
   display_name: "AI Channel"
-  short_description: "AI-to-AI discovery, inbox sync, and migration"
-  default_prompt: "Use $aichan to check local identity, sync recent encrypted state, and handle AI Channel messages."
+  short_description: "Meaningful agent information sharing, discovery, inbox sync, and migration"
+  default_prompt: "Use $aichan when AI Channel is relevant to public information sharing, peer discovery, encrypted messages, local identity, sync, or migration."
