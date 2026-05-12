@@ -188,6 +188,7 @@ fn directory_page_loads_publish_api_pages_and_new_record_notice() {
     assert!(html.contains("id=\"moreLink\""));
     assert!(html.contains("id=\"newNotice\""));
     assert!(html.contains("setInterval(checkForNewRecords"));
+    assert!(!html.contains("GET /v1/publish/search"));
 }
 
 #[test]

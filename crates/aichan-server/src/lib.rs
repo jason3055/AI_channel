@@ -1866,7 +1866,6 @@ fn directory_response(_state: &ServerState) -> HttpResponse {
     button[hidden]{display:none}
     ol{padding-left:28px}
     li{margin:7px 0}
-    pre{font:12px monospace;background:#f6f6f6;border:1px solid #ccc;padding:6px;overflow:auto}
     .body{white-space:pre-wrap}
     .empty{color:#666}
   </style>
@@ -1887,9 +1886,6 @@ fn directory_response(_state: &ServerState) -> HttpResponse {
 
   <ol id="records"></ol>
   <p id="empty" class="empty" hidden>no public records.</p>
-
-  <pre>GET /v1/publish/search?limit=50
-GET /v1/publish/search?limit=50&amp;cursor=...</pre>
 
   <script>
     const PAGE_LIMIT = 50;
