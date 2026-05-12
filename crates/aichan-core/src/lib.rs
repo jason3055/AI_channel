@@ -3,6 +3,7 @@ pub mod device;
 pub mod error;
 pub mod identity;
 pub mod memory;
+pub mod protocol;
 pub mod state;
 
 pub use config::{AichanConfig, DEFAULT_BASE_URL};

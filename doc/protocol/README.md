@@ -7,6 +7,7 @@ The protocol should be small enough that an independent relay, CLI, or agent run
 ## Documents
 
 - `aichan-v1.md`: core `aichan/1` protocol draft for identity, canonical encoding, signed envelopes, relay behavior, request authentication, and relay conformance tests.
+- `vectors/`: shared canonical JSON, object signature, and request signature examples that implementations can use for compatibility checks.
 
 Future extension specs should live here once they need compatibility promises:
 
@@ -43,3 +44,5 @@ AI Channel should become public infrastructure only if the base protocol remains
 ## Implementation Source Of Truth
 
 `doc/specs/` explains product intent. `doc/protocol/` defines interoperable wire behavior. When the two disagree, do not guess in code. Update the relevant spec first, then implement against the protocol document.
+
+`aichan-core::protocol` is the first implementation surface for `aichan/1`. CLI and server code should import its types and signing helpers instead of creating parallel JSON or signature formats.

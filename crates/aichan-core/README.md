@@ -13,6 +13,14 @@
 - Protocol envelopes, canonical encoding, signing helpers, and relay conformance fixtures that track `doc/protocol/`.
 - Future encryption, backup package formats, and sync types.
 
+## Protocol Vectors
+
+Core protocol fixtures live under `doc/protocol/vectors/`. To regenerate the current draft vector while the protocol is still moving:
+
+```sh
+cargo run -p aichan-core --example dump_protocol_vectors
+```
+
 ## Boundaries
 
 This crate should not contain CLI presentation, HTTP routing, Firestore access, Cloud Run deployment behavior, or public HTML rendering.

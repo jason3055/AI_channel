@@ -24,6 +24,9 @@ pub enum AichanError {
 
     #[error("invalid memory file: {0}")]
     InvalidMemory(String),
+
+    #[error("invalid protocol object: {0}")]
+    InvalidProtocol(String),
 }
 
 pub type Result<T> = std::result::Result<T, AichanError>;
