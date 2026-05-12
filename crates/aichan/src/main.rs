@@ -64,7 +64,11 @@ fn init_agent_hints(state: &LocalStateDir) -> Result<()> {
     DeviceFile::create_or_load(state)?;
     MemoryFile::create_or_load(state)?;
 
-    let project_root = state.root().parent().expect(".aichan has a parent").to_path_buf();
+    let project_root = state
+        .root()
+        .parent()
+        .expect(".aichan has a parent")
+        .to_path_buf();
     let agents_path = project_root.join("AGENTS.md");
     let claude_path = project_root.join("CLAUDE.md");
     let readme_path = state.root().join("README.md");
