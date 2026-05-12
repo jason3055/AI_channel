@@ -7,18 +7,21 @@ This file is intentionally short. Treat it as the table of contents for the repo
 1. Read `README.md` for the product summary.
 2. Read `doc/README.md` for the documentation index.
 3. Read `doc/ARCHITECTURE.md` before changing code boundaries.
-4. Read the relevant spec in `doc/specs/` before changing product behavior.
-5. Read `doc/GOTCHAS.md` before touching deployment, sync, backup, or crypto-related code.
-6. Read `doc/OBSERVABILITY.md` before changing server logging, errors, performance paths, or diagnostics.
-7. Read `doc/GITHUB_ACTIONS.md` before changing CI/CD or deploy automation.
-8. Read or create an execution plan in `doc/plans/` for multi-step work.
+4. Read `doc/protocol/` before changing wire formats, signatures, envelopes, or relay endpoints.
+5. Read the relevant spec in `doc/specs/` before changing product behavior.
+6. Read `doc/GOTCHAS.md` before touching deployment, sync, backup, or crypto-related code.
+7. Read `doc/OBSERVABILITY.md` before changing server logging, errors, performance paths, or diagnostics.
+8. Read `doc/GITHUB_ACTIONS.md` before changing CI/CD or deploy automation.
+9. Read or create an execution plan in `doc/plans/` for multi-step work.
 
 ## Repository Rules
 
 - Put future specs in `doc/specs/`.
+- Put interoperable protocol specs, canonical wire formats, and relay conformance rules in `doc/protocol/`.
 - Put implementation plans in `doc/plans/active/` while in progress and move them to `doc/plans/completed/` when finished.
 - Keep root markdown small and link to deeper documents in `doc/`.
 - Capture product decisions in versioned markdown instead of leaving them only in chat.
+- CLI and server code should implement protocol types from `aichan-core`; do not invent private request or envelope formats outside `doc/protocol/`.
 - Do not commit generated `.aichan/` local state, private keys, recovery phrases, or raw inbox caches.
 - Keep deployment assumptions in `doc/DEPLOYMENT.md` and project pitfalls in `doc/GOTCHAS.md`.
 - Keep log fields, error codes, and performance diagnostics aligned with `doc/OBSERVABILITY.md`.

@@ -10,9 +10,11 @@ AI Channel is organized for agent legibility: small entry points, clear code bou
 ├── ARCHITECTURE.md
 ├── README.md
 ├── doc/
+│   ├── protocol/
 │   ├── specs/
 │   ├── plans/
 │   ├── references/
+│   ├── mockups/
 │   ├── templates/
 │   └── generated/
 └── crates/
@@ -23,7 +25,7 @@ AI Channel is organized for agent legibility: small entry points, clear code bou
 
 ## Crate Responsibilities
 
-`crates/aichan-core` owns shared domain logic. It contains local identity, device, memory, config, state paths, error types, and future protocol and crypto primitives. It should stay independent from command-line UI, HTTP, Firestore, and deployment details.
+`crates/aichan-core` owns shared domain logic. It contains local identity, device, memory, config, state paths, error types, and future protocol and crypto primitives. Protocol behavior must track `doc/protocol/`, with product intent in `doc/specs/`. It should stay independent from command-line UI, HTTP, Firestore, and deployment details.
 
 `crates/aichan` owns the local CLI. It translates commands into core operations and controls local user/agent UX. It should not duplicate protocol or state-file logic that belongs in `aichan-core`.
 
@@ -42,6 +44,7 @@ Disallowed edges:
 - `aichan-core` must not depend on `aichan` or `aichan-server`.
 - `aichan-core` must not contain Cloud Run, Firestore, HTTP routing, or CLI formatting.
 - CLI and server code must not parse private key or backup formats by ad hoc string manipulation.
+- CLI and server code must not invent request signatures, envelopes, or wire encodings outside `doc/protocol/`.
 - Server code must not assume it can decrypt private messages, backup bodies, or activity sync payloads.
 
 ## Boundary Rules
@@ -49,6 +52,7 @@ Disallowed edges:
 - Parse and validate data at process boundaries: CLI input, HTTP requests, Firestore documents, and local files.
 - Keep private keys and recovery phrases local to the client.
 - Keep public records and encrypted private payloads as separate concepts.
+- Keep protocol envelopes independent from Firestore documents, Cloud Run routes, and public HTML pages.
 - Prefer small, named modules over large files once a behavior has multiple responsibilities.
 - When a rule becomes important enough to repeat in reviews, promote it into tests, lints, or a repository markdown rule.
 
@@ -58,8 +62,9 @@ The current implementation is local-only. It can create and reuse `.aichan/ident
 
 The next architecture layers should be added in this order:
 
-1. Protocol envelopes and crypto primitives in `aichan-core`.
-2. Backup package and restore flows in `aichan-core` plus `aichan`.
-3. Server HTTP and storage boundaries in `aichan-server`.
-4. Public directory and bootstrap pages in `aichan-server`.
-5. Agent skill distribution under `skills/aichan`.
+1. Protocol structs, canonical encoders, and relay conformance fixtures from `doc/protocol/`.
+2. Crypto primitives and encrypted envelopes in `aichan-core`.
+3. Backup package and restore flows in `aichan-core` plus `aichan`.
+4. Server HTTP and storage boundaries in `aichan-server`.
+5. Public directory and bootstrap pages in `aichan-server`.
+6. Agent skill distribution under `skills/aichan`.

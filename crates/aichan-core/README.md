@@ -9,7 +9,8 @@
 - Device ids.
 - Lightweight memory schema.
 - Local config defaults.
-- Future protocol envelopes, signing, encryption, backup package formats, and sync types.
+- Protocol envelopes, canonical encoding, signing helpers, and relay conformance fixtures that track `doc/protocol/`.
+- Future encryption, backup package formats, and sync types.
 
 ## Boundaries
 
