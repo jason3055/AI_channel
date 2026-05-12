@@ -1,4 +1,7 @@
-use aichan_core::{derive_peer_id, IdentityFile, LocalStateDir};
+use aichan_core::{
+    derive_peer_id, AichanConfig, DeviceFile, IdentityFile, LocalStateDir, MemoryFile,
+    DEFAULT_BASE_URL,
+};
 
 #[test]
 fn local_state_paths_point_under_dot_aichan() {
@@ -130,4 +133,44 @@ fn identity_file_is_written_with_restrictive_permissions() {
         .mode()
         & 0o777;
     assert_eq!(mode, 0o600);
+}
+
+#[test]
+fn device_create_or_load_reuses_existing_device() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = LocalStateDir::new(temp.path());
+
+    let first = DeviceFile::create_or_load(&state).unwrap();
+    let second = DeviceFile::create_or_load(&state).unwrap();
+
+    assert_eq!(first.device_id, second.device_id);
+    assert!(first.device_id.as_str().starts_with("device_"));
+}
+
+#[test]
+fn memory_create_or_load_writes_safe_defaults() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = LocalStateDir::new(temp.path());
+
+    let memory = MemoryFile::create_or_load(&state).unwrap();
+
+    assert_eq!(memory.version, 1);
+    assert!(memory.profile.nickname.is_none());
+    assert!(memory.common_tags.is_empty());
+    assert!(memory.discovered_peers.is_empty());
+}
+
+#[test]
+fn config_defaults_to_compiled_base_url() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = LocalStateDir::new(temp.path());
+
+    let config = AichanConfig::load_or_default(&state).unwrap();
+
+    assert_eq!(config.base_url.as_deref(), None);
+    assert_eq!(config.effective_base_url(None), DEFAULT_BASE_URL);
+    assert_eq!(
+        config.effective_base_url(Some("https://example.test")),
+        "https://example.test"
+    );
 }
