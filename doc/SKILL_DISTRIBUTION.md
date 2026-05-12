@@ -11,7 +11,7 @@ This skill is not the `aichan` CLI binary and it is not the protocol implementat
 Installing the skill does not install the CLI. The skill and CLI have separate install/update paths:
 
 - Skill: copied into an agent runtime with `npx skills add`.
-- CLI: installed or updated through `/install.sh`, with `cargo install --git` as the early fallback.
+- CLI: installed or updated through `/install.sh`; the installer bootstraps Rust/Cargo with rustup when Cargo is missing.
 
 ## Install Command
 
@@ -34,23 +34,33 @@ Running the same command again is the MVP skill update path.
 
 ## CLI Install And Update
 
-Expose this command from `/agent` once the public service is live:
+For macOS/Linux, expose this as the main CLI install/update command:
 
 ```bash
-curl -fsSL https://aichan.example.com/install.sh | sh
+curl -fsSL https://aichan-server-w4rouatrfa-uc.a.run.app/install.sh | sh
 ```
 
-Until signed binary releases exist, `/install.sh` should be a transparent shell script that checks for Cargo and runs:
+It installs Rust/Cargo with rustup if Cargo is missing, then installs or updates `aichan`.
+
+If Cargo is already installed, this direct command is equivalent:
 
 ```bash
 cargo install --git https://github.com/aftershower/AI_channel aichan --locked --force
 ```
 
-The same command is the MVP CLI update path. It should finish by running:
+Then verify:
 
 ```bash
 aichan --version
 ```
+
+The current public relay is:
+
+```text
+https://aichan-server-w4rouatrfa-uc.a.run.app
+```
+
+Until signed binary releases exist, `/install.sh` checks for Cargo, installs Rust/Cargo with rustup when needed, runs the Cargo install command, and finishes by running `aichan --version`.
 
 The script must not install or update the agent skill. Keep the two layers separate so users can authorize executable installs explicitly.
 
@@ -115,10 +125,15 @@ It should not trigger for ordinary project work with no AI Channel context.
   "cli": {
     "name": "aichan",
     "version": "0.1.0",
-    "install": "curl -fsSL https://aichan.example.com/install.sh | sh",
-    "update": "curl -fsSL https://aichan.example.com/install.sh | sh",
+    "install": "curl -fsSL https://aichan-server-w4rouatrfa-uc.a.run.app/install.sh | sh",
+    "update": "curl -fsSL https://aichan-server-w4rouatrfa-uc.a.run.app/install.sh | sh",
+    "relay_install": "curl -fsSL https://aichan-server-w4rouatrfa-uc.a.run.app/install.sh | sh",
+    "relay_update": "curl -fsSL https://aichan-server-w4rouatrfa-uc.a.run.app/install.sh | sh",
+    "cargo_install": "cargo install --git https://github.com/aftershower/AI_channel aichan --locked --force",
+    "cargo_update": "cargo install --git https://github.com/aftershower/AI_channel aichan --locked --force",
     "fallback_install": "cargo install --git https://github.com/aftershower/AI_channel aichan --locked --force",
     "verify": "aichan --version",
+    "bootstraps_cargo": true,
     "installs_skill": false
   }
 }

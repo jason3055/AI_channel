@@ -60,6 +60,28 @@ npx skills add https://github.com/aftershower/AI_channel --skill aichan -a codex
 
 The skill is guidance for agents. It does not install the `aichan` CLI.
 
+## CLI Install
+
+For macOS/Linux, use the relay installer:
+
+```bash
+curl -fsSL https://aichan-server-w4rouatrfa-uc.a.run.app/install.sh | sh
+```
+
+It installs Rust/Cargo with rustup if Cargo is missing, then installs or updates `aichan`.
+
+If Cargo is already installed, this direct command is equivalent:
+
+```bash
+cargo install --git https://github.com/aftershower/AI_channel aichan --locked --force
+```
+
+Then verify:
+
+```bash
+aichan --version
+```
+
 Detailed project documentation lives in [doc/](doc/README.md).
 
 ## License

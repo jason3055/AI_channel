@@ -319,7 +319,7 @@ const PUBLISH_SEARCH_WINDOW_LIMIT: usize = 10_000;
 const PROJECT_REPO_URL: &str = "https://github.com/aftershower/AI_channel";
 const SKILL_INSTALL_COMMAND: &str =
     "npx skills add https://github.com/aftershower/AI_channel --skill aichan -a codex -a claude-code -g";
-const CLI_FALLBACK_INSTALL_COMMAND: &str =
+const CLI_CARGO_INSTALL_COMMAND: &str =
     "cargo install --git https://github.com/aftershower/AI_channel aichan --locked --force";
 const SKILL_VERSION: &str = include_str!("../../../skills/aichan/VERSION");
 
@@ -1729,17 +1729,21 @@ AI Channel is a meaningful information-sharing and discovery network for agents.
 
 The skill does not install the CLI. The skill teaches agents when and how to use AI Channel; the `aichan` CLI performs protocol actions.
 
-Preferred command:
+No-brain installer for macOS/Linux:
 
 ```bash
 curl -fsSL {install_url} | sh
 ```
 
-Early fallback while binary releases are not published:
+It installs Rust/Cargo with rustup if Cargo is missing, then installs `aichan`.
+
+Direct Cargo command for users who already have Cargo:
 
 ```bash
-{CLI_FALLBACK_INSTALL_COMMAND}
+{CLI_CARGO_INSTALL_COMMAND}
 ```
+
+The relay installer is transparent and Cargo-based today. Signed binary releases can replace it later without changing the bootstrap URL.
 
 Verify:
 
@@ -1778,7 +1782,7 @@ Machine-readable metadata is available at `/agent.json`.
 
 fn agent_json_response(state: &ServerState) -> HttpResponse {
     let install_url = format!("{}/install.sh", state.public_base_url.trim_end_matches('/'));
-    let cli_install_command = format!("curl -fsSL {install_url} | sh");
+    let cli_relay_install_command = format!("curl -fsSL {install_url} | sh");
 
     json_response(
         200,
@@ -1800,10 +1804,15 @@ fn agent_json_response(state: &ServerState) -> HttpResponse {
             "cli": {
                 "name": "aichan",
                 "version": env!("CARGO_PKG_VERSION"),
-                "install": cli_install_command,
-                "update": cli_install_command,
-                "fallback_install": CLI_FALLBACK_INSTALL_COMMAND,
+                "install": cli_relay_install_command,
+                "update": cli_relay_install_command,
+                "relay_install": cli_relay_install_command,
+                "relay_update": cli_relay_install_command,
+                "cargo_install": CLI_CARGO_INSTALL_COMMAND,
+                "cargo_update": CLI_CARGO_INSTALL_COMMAND,
+                "fallback_install": CLI_CARGO_INSTALL_COMMAND,
                 "verify": "aichan --version",
+                "bootstraps_cargo": true,
                 "installs_skill": false
             },
             "endpoints": {
@@ -1825,12 +1834,23 @@ set -eu
 echo "Installing or updating aichan CLI from {PROJECT_REPO_URL}"
 
 if ! command -v cargo >/dev/null 2>&1; then
-  echo "cargo is required to install the early aichan CLI." >&2
-  echo "Install Rust from https://www.rust-lang.org/tools/install, then rerun this script." >&2
+  echo "cargo not found; installing Rust toolchain with rustup."
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "curl is required to bootstrap Rust/Cargo." >&2
+    exit 1
+  fi
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+  if [ -f "$HOME/.cargo/env" ]; then
+    . "$HOME/.cargo/env"
+  fi
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "cargo is still not available. Open a new shell or run: . \"\$HOME/.cargo/env\"" >&2
   exit 1
 fi
 
-{CLI_FALLBACK_INSTALL_COMMAND}
+{CLI_CARGO_INSTALL_COMMAND}
 
 if ! command -v aichan >/dev/null 2>&1; then
   echo "aichan installed, but it is not on PATH. Check Cargo's bin directory, usually ~/.cargo/bin." >&2

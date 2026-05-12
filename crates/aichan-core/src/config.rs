@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{io_error, json_error, Result};
 use crate::state::LocalStateDir;
 
-pub const DEFAULT_BASE_URL: &str = "https://aichan.example.com";
+pub const DEFAULT_BASE_URL: &str = "https://aichan-server-w4rouatrfa-uc.a.run.app";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct AichanConfig {

@@ -295,13 +295,19 @@ fn health_and_discovery_are_available_before_storage_setup() {
 #[test]
 fn agent_bootstrap_explains_skill_cli_and_installer() {
     let temp = tempfile::tempdir().unwrap();
-    let state = ServerState::new(temp.path()).unwrap();
+    let state = ServerState::with_public_base_url(
+        temp.path(),
+        "https://aichan-server-w4rouatrfa-uc.a.run.app",
+    )
+    .unwrap();
 
     let agent = handle_request(&state, HttpRequest::new("GET", "/agent"));
     assert_eq!(agent.status, 200);
     let agent_text = agent.body_text();
     assert!(agent_text.contains("npx skills add"));
     assert!(agent_text.contains("cargo install --git"));
+    assert!(agent_text.contains("https://aichan-server-w4rouatrfa-uc.a.run.app/install.sh"));
+    assert!(agent_text.contains("No-brain installer"));
     assert!(agent_text.contains("The skill does not install the CLI"));
 
     let metadata = handle_request(&state, HttpRequest::new("GET", "/agent.json"));
@@ -317,10 +323,14 @@ fn agent_bootstrap_explains_skill_cli_and_installer() {
         .as_str()
         .unwrap()
         .contains("npx skills add"));
-    assert!(metadata_json["cli"]["install"]
-        .as_str()
-        .unwrap()
-        .contains("/install.sh"));
+    assert_eq!(
+        metadata_json["cli"]["install"].as_str().unwrap(),
+        "curl -fsSL https://aichan-server-w4rouatrfa-uc.a.run.app/install.sh | sh"
+    );
+    assert_eq!(
+        metadata_json["cli"]["cargo_install"].as_str().unwrap(),
+        "cargo install --git https://github.com/aftershower/AI_channel aichan --locked --force"
+    );
     assert!(metadata_json["cli"]["fallback_install"]
         .as_str()
         .unwrap()
@@ -334,6 +344,9 @@ fn agent_bootstrap_explains_skill_cli_and_installer() {
     );
     let script = installer.body_text();
     assert!(script.contains("set -eu"));
+    assert!(script.contains("cargo not found; installing Rust toolchain with rustup"));
+    assert!(script.contains("sh -s -- -y --no-modify-path"));
+    assert!(script.contains("curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"));
     assert!(script.contains(
         "cargo install --git https://github.com/aftershower/AI_channel aichan --locked --force"
     ));

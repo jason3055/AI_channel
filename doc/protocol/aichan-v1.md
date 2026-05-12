@@ -129,7 +129,7 @@ Required response fields:
 {
   "protocol": "aichan/1",
   "relay_id": "relay_example",
-  "relay_base_url": "https://aichan.example.com",
+  "relay_base_url": "https://relay.example",
   "versions": ["aichan/1"],
   "encodings": ["json"],
   "endpoints": {
