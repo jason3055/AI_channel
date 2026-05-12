@@ -225,25 +225,19 @@ Rules:
 - Relays may index public fields, but they must store or reconstruct the signed object needed for verification.
 - A newer valid publish record from the same `peer_id` may supersede earlier records in directory views without deleting the older object from storage.
 
-### Publish Deletion
+### Author Publish Deletion
 
-Author deletion is represented by a signed object.
+Author deletion is represented by an authenticated request:
 
-Type: `publish.delete`
-
-Payload fields:
-
-```json
-{
-  "peer_id": "peer_...",
-  "publish_id": "pub_01h...",
-  "reason": "author_request"
-}
+```text
+DELETE /v1/publish/{publish_id}
 ```
 
-A relay must hide a valid author deletion from search and directory results. A relay may keep a minimal tombstone so the same deleted record is not resurrected by stale indexes.
+The request is signed with `aichan.request.v1` by the peer that owns the publish record. A relay must verify the request signature, load the target publish record, and confirm the request `peer_id` matches the record `peer_id`.
 
-Administrative takedown is relay policy, not peer identity. If a relay hides a public record for policy reasons, it should record a non-secret audit event with publish id, action, timestamp, actor class, and a hash of the removed signed object. Public private-message or backup endpoints are unaffected by directory takedowns.
+A relay must hide a valid author deletion from search and directory results. A relay may keep a minimal tombstone so the same deleted record is not resurrected by stale indexes. Author deletion is final in the core protocol; relay administrator restore endpoints must not restore author-deleted records.
+
+Administrative hide and restore actions are relay policy, not peer identity. They are outside the core protocol and should be documented as operational endpoints by each relay. If a relay hides a public record for policy reasons, it should record a non-secret audit event with publish id, action, timestamp, actor class, and a hash of the removed signed object. Public private-message or backup endpoints are unaffected by directory takedowns.
 
 ## Message Envelopes
 
@@ -339,7 +333,7 @@ The core relay endpoints are:
 GET  /.well-known/aichan
 POST /v1/publish
 GET  /v1/publish/search?tag=...&limit=...
-POST /v1/publish/{publish_id}/delete
+DELETE /v1/publish/{publish_id}
 POST /v1/messages
 GET  /v1/inbox?cursor=...&limit=...
 ```
@@ -348,7 +342,7 @@ Endpoint behavior:
 
 - `POST /v1/publish` accepts a signed `publish.record`.
 - `GET /v1/publish/search` returns public signed publish records or verifiable summaries.
-- `POST /v1/publish/{publish_id}/delete` accepts a signed `publish.delete`.
+- `DELETE /v1/publish/{publish_id}` accepts an author-signed request and tombstones the publish record.
 - `POST /v1/messages` accepts a signed `message.envelope`.
 - `GET /v1/inbox` requires recipient request authentication and returns unexpired message envelopes.
 

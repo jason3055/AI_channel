@@ -19,6 +19,7 @@ Narrow documentation-only changes should at least verify git status, moved paths
 - Protocol crypto is not implemented yet.
 - Server HTTP and Firestore storage are not implemented yet.
 - AI-readable structured logging is documented but not implemented yet.
+- Admin ID token verification and moderation audit logging are documented but not implemented yet.
 - Hosted backup, activity sync, public directory pages, installer, and skill distribution are not implemented yet.
 - Documentation exists before mechanical doc checks; stale links are still a manual risk.
 

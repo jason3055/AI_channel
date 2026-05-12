@@ -87,6 +87,8 @@ For the current Cloud Run deployment path, GitHub Secrets should be empty. Use r
 
 If a future integration needs real secret material, prefer Google Secret Manager and inject it into Cloud Run at runtime. Only use GitHub Secrets for values that GitHub Actions itself must consume directly and cannot obtain through Google Cloud identity.
 
+Admin moderation credentials do not belong in GitHub. Operators use Google-issued ID tokens, and the runtime service reads the admin allowlist from service config or Google Secret Manager.
+
 Examples that belong in GitHub Actions variables:
 
 - Google Cloud project id and number.
@@ -104,6 +106,8 @@ Examples that should not be stored in GitHub:
 - Recovery phrases.
 - Backup encryption keys.
 - Log hash secrets.
+- Admin ID tokens.
+- Admin principal allowlists when they are treated as runtime configuration or stored in Secret Manager.
 - Third-party API tokens used only by the running service.
 
 ## Google Cloud Identities

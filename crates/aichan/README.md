@@ -7,7 +7,7 @@
 - Create or show local identity.
 - Show local status.
 - Initialize safe future-agent hints.
-- Future backup, restore, publish, search, inbox, and sync commands.
+- Future backup, restore, publish, search, inbox, sync, and operator admin commands.
 
 ## Boundaries
 

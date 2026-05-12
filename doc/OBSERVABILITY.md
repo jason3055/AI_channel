@@ -72,6 +72,9 @@ inbox.completed
 activity.sync.completed
 backup.upload.accepted
 backup.upload.rejected
+admin.publish.hidden
+admin.publish.restored
+admin.publish.rejected
 firestore.query.completed
 firestore.query.failed
 rate_limit.triggered
@@ -79,6 +82,39 @@ request.failed
 ```
 
 Names should be stable enough for dashboards and agent queries. Do not include ids, tags, or user-controlled strings in `event.name`.
+
+## Admin Audit Logs
+
+Every `/admin/...` request emits a structured audit event, including rejected attempts when the request reaches application auth:
+
+```json
+{
+  "schema_version": 1,
+  "severity": "WARNING",
+  "message": "admin publish hidden",
+  "event": {
+    "name": "admin.publish.hidden",
+    "kind": "audit"
+  },
+  "route": "/admin/publish/{publish_id}/hide",
+  "method": "POST",
+  "status": 200,
+  "request_id": "req_...",
+  "admin": {
+    "principal": "operator@example.com",
+    "principal_hash": "sha256:...",
+    "auth_provider": "google_id_token"
+  },
+  "moderation": {
+    "publish_id": "pub_...",
+    "action": "hide",
+    "reason": "spam",
+    "signed_object_hash": "sha256:..."
+  }
+}
+```
+
+Admin audit logs may include the authenticated Google principal in restricted operational logs. Dashboards and high-cardinality labels should use `admin.principal_hash`, not raw email. Audit logs must not include publish body text or authorization headers.
 
 ## Error Logs
 

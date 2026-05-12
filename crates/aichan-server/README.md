@@ -8,6 +8,7 @@
 - Temporary encrypted message and activity sync APIs.
 - Optional hosted encrypted backup storage.
 - Public directory and bootstrap pages.
+- Admin publish hide/restore endpoints protected by Google-issued ID tokens and allowlisted principals.
 - Future Firestore repositories and HTTP validation.
 - Structured logs, error codes, and performance diagnostics that follow `doc/OBSERVABILITY.md`.
 

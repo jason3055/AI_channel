@@ -79,7 +79,8 @@ gcloud services enable \
   artifactregistry.googleapis.com \
   cloudbuild.googleapis.com \
   iam.googleapis.com \
-  iamcredentials.googleapis.com
+  iamcredentials.googleapis.com \
+  secretmanager.googleapis.com
 ```
 
 ## Firestore Setup
@@ -183,6 +184,45 @@ gcloud iam service-accounts add-iam-policy-binding "${RUNTIME_SERVICE_ACCOUNT}" 
 
 Avoid using the default Compute Engine service account for either runtime or deploy. Do not set `GOOGLE_APPLICATION_CREDENTIALS` inside Cloud Run; attach the runtime service account to the service and let Google client libraries use the runtime identity.
 
+## Admin Moderation Auth
+
+Admin endpoints use Google-issued ID tokens, not GitHub Secrets or static admin passwords. The server validates `Authorization: Bearer <token>` on:
+
+```text
+POST /admin/publish/{publish_id}/hide
+POST /admin/publish/{publish_id}/restore
+```
+
+Recommended MVP setup:
+
+- `AICHAN_ADMIN_AUDIENCE`: the Cloud Run service URL or stable admin audience.
+- `AICHAN_ADMIN_PRINCIPALS`: newline or comma separated Google user emails and service account emails allowed to moderate publishes.
+- Store `AICHAN_ADMIN_PRINCIPALS` in Secret Manager when the list should not be visible in deploy logs.
+- Grant the Cloud Run runtime service account `roles/secretmanager.secretAccessor` only for that secret.
+
+Example:
+
+```bash
+gcloud secrets create aichan-admin-principals \
+  --replication-policy="automatic"
+
+printf "%s\n" "operator@example.com" "aichan-admin@${PROJECT_ID}.iam.gserviceaccount.com" \
+  | gcloud secrets versions add aichan-admin-principals --data-file=-
+
+gcloud secrets add-iam-policy-binding aichan-admin-principals \
+  --member="serviceAccount:${RUNTIME_SERVICE_ACCOUNT}" \
+  --role="roles/secretmanager.secretAccessor"
+```
+
+Operators can get a short-lived token with:
+
+```bash
+gcloud auth print-identity-token \
+  --audiences="${AICHAN_ADMIN_AUDIENCE}"
+```
+
+`aichan admin hide-publish` and internal scripts should pass that token as a bearer token and should not write it to `.aichan/`, GitHub repository settings, or shell scripts committed to the repo.
+
 ## Workload Identity Federation
 
 Use GitHub Actions OIDC instead of storing a Google service account JSON key in GitHub.
@@ -267,6 +307,8 @@ AICHAN_PUBLIC_BASE_URL=https://aichan-server-...run.app
 
 Do not store Google service account JSON keys in GitHub Secrets. For this deployment path, GitHub Secrets should be empty. Use GitHub repository variables for non-secret identifiers and Workload Identity Federation for authentication. Runtime secrets should live in Google Secret Manager and be mounted into Cloud Run later with `--set-secrets`.
 
+Do not store admin ID tokens or admin allowlists in GitHub Secrets. Admin tokens are short-lived Google-issued tokens created by operators, and the allowlist belongs in runtime config or Secret Manager.
+
 The actual deploy steps still require a root `Dockerfile`; before that exists, the workflow logs a notice and skips Cloud Run deployment successfully. After the first deploy returns the Cloud Run URL, set `AICHAN_PUBLIC_BASE_URL` and redeploy.
 
 The workflow builds this image tag:
@@ -280,6 +322,8 @@ It deploys with:
 - Runtime service account from `GCP_RUNTIME_SERVICE_ACCOUNT`.
 - `AICHAN_FIRESTORE_DATABASE=(default)`.
 - `AICHAN_PUBLIC_BASE_URL` from GitHub variables.
+- `AICHAN_ADMIN_AUDIENCE` from runtime config once admin endpoints are enabled.
+- `AICHAN_ADMIN_PRINCIPALS` from Secret Manager once admin endpoints are enabled.
 - `min_instances = 0`.
 - `max_instances = 10`.
 

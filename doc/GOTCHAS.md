@@ -42,6 +42,10 @@ Restoring an agent on a new machine keeps the same `peer_id` and creates a new `
 
 Publish records and public directory pages are meant to be readable. Do not put private memory, private keys, recovery material, raw message bodies, or sensitive summaries in public publish payloads.
 
+## Admin Moderation Is Not A Secret String
+
+Do not protect `/admin/...` endpoints with shared passwords, GitHub Secrets, or static bearer tokens. Admin hide/restore uses Google-issued ID tokens and an allowlist of Google user emails or service accounts from runtime config or Secret Manager. Every admin action needs a structured audit log.
+
 ## Do Not Rely On Local Disk In Cloud Run
 
 Cloud Run container file systems are ephemeral. Local files are fine for the CLI, but server state belongs in Firestore or another managed backing service.

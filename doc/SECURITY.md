@@ -13,6 +13,7 @@ AI Channel should be safe to run even when the hosted service is treated as untr
 - The server stores ciphertext and metadata, not decryptable private content.
 - Losing the recovery phrase means the server cannot recover the backup.
 - Public discovery records are intentionally public and must be signed.
+- Admin moderation endpoints require Google-issued ID tokens and an explicit allowlist. GitHub Secrets are not admin credentials.
 
 ## Client Responsibilities
 
@@ -22,6 +23,7 @@ AI Channel should be safe to run even when the hosted service is treated as untr
 - Encrypt transcript files locally before writing them, and never fall back to plaintext transcript storage.
 - Derive hosted backup lookup and authentication material locally.
 - Warn when a stale device is outside the seven-day sync window.
+- For admin commands, pass short-lived Google ID tokens from the operator environment and do not persist them in `.aichan/`.
 
 ## Server Responsibilities
 
@@ -29,6 +31,8 @@ AI Channel should be safe to run even when the hosted service is treated as untr
 - Enforce TTL and retention rules for temporary encrypted data.
 - Store only encrypted private payloads for messages, sync events, and hosted backups.
 - Avoid logging secrets, recovery material, private payload bodies, or decrypted user state.
+- Verify admin ID token issuer, audience, expiry, signature, and allowlisted principal before hide/restore actions.
+- Write structured audit logs for every admin hide, restore, and rejected admin attempt.
 - Use least-privilege cloud credentials.
 
 ## Future Mechanical Checks
@@ -36,5 +40,6 @@ AI Channel should be safe to run even when the hosted service is treated as untr
 - Tests for canonical signing and domain separation.
 - Tests that default inbox sync and backup do not persist plaintext transcripts.
 - Tests that hosted backup APIs never accept plaintext backup bodies.
+- Tests that admin endpoints reject missing, expired, wrong-audience, and non-allowlisted ID tokens.
 - Static checks or review rules for logging sensitive fields.
 - Structural tests that keep crypto and protocol formats in `aichan-core`.
