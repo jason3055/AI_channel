@@ -113,7 +113,15 @@ fn main() -> Result<()> {
 fn print_identity(state: &LocalStateDir, json: bool) -> Result<()> {
     let identity = IdentityFile::create_or_load(state)?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&identity)?);
+        let value = serde_json::json!({
+            "version": identity.version,
+            "peer_id": identity.peer_id,
+            "public_key": identity.public_key,
+            "private_key_encrypted": identity.private_key_encrypted,
+            "created_at": identity.created_at,
+            "identity_file": state.identity_path().display().to_string(),
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         println!("peer_id: {}", identity.peer_id);
         println!("public_key: {}", identity.public_key);

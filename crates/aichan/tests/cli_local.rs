@@ -26,10 +26,16 @@ fn identity_creates_and_reuses_local_identity() {
         .current_dir(temp.path())
         .arg("identity")
         .arg("--json");
-    second
+    let second_output = second
         .assert()
         .success()
-        .stdout(predicate::str::contains("peer_"));
+        .stdout(predicate::str::contains("peer_"))
+        .get_output()
+        .stdout
+        .clone();
+    let second_json: serde_json::Value = serde_json::from_slice(&second_output).unwrap();
+    assert!(second_json.get("private_key").is_none());
+    assert!(second_json.get("private_key_encrypted").is_some());
 
     let second_file = std::fs::read_to_string(&identity_path).unwrap();
     assert_eq!(first_file, second_file);

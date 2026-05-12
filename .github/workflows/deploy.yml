@@ -114,6 +114,7 @@ jobs:
             AICHAN_READ_RATE_PER_MINUTE=120
             AICHAN_WRITE_RATE_PER_MINUTE=20
             AICHAN_MAX_BODY_BYTES=65536
+            AICHAN_MAX_CONNECTIONS=64
           env_vars_update_strategy: merge
           flags: |-
             --service-account=${{ env.RUNTIME_SERVICE_ACCOUNT }}

@@ -11,7 +11,7 @@ use aichan_core::protocol::{
     AichanRequestSignature, PublishRecordPayload, RequestToSign, SignedProtocolObject, PROTOCOL_ID,
 };
 use anyhow::{Context, Result};
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -20,6 +20,9 @@ pub struct ServerState {
     data_dir: Arc<PathBuf>,
     public_base_url: Arc<String>,
     rate_limiter: Arc<RateLimiter>,
+    connection_limiter: Arc<ConnectionLimiter>,
+    publish_store_lock: Arc<Mutex<()>>,
+    request_auth: Arc<RequestAuthTracker>,
 }
 
 impl ServerState {
@@ -50,6 +53,20 @@ impl ServerState {
         public_base_url: impl Into<String>,
         rate_limits: RateLimitConfig,
     ) -> Result<Self> {
+        Self::with_public_base_url_rate_limits_and_max_connections(
+            data_dir,
+            public_base_url,
+            rate_limits,
+            DEFAULT_MAX_CONNECTIONS,
+        )
+    }
+
+    pub fn with_public_base_url_rate_limits_and_max_connections(
+        data_dir: impl AsRef<Path>,
+        public_base_url: impl Into<String>,
+        rate_limits: RateLimitConfig,
+        max_connections: usize,
+    ) -> Result<Self> {
         let data_dir = data_dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&data_dir)
             .with_context(|| format!("create data dir {}", data_dir.display()))?;
@@ -57,6 +74,9 @@ impl ServerState {
             data_dir: Arc::new(data_dir),
             public_base_url: Arc::new(public_base_url.into()),
             rate_limiter: Arc::new(RateLimiter::new(rate_limits)),
+            connection_limiter: Arc::new(ConnectionLimiter::new(max_connections.max(1))),
+            publish_store_lock: Arc::new(Mutex::new(())),
+            request_auth: Arc::new(RequestAuthTracker::default()),
         })
     }
 
@@ -78,6 +98,82 @@ impl ServerState {
             class.limit(self.rate_limiter.config),
         )
     }
+}
+
+#[derive(Debug)]
+struct ConnectionLimiter {
+    max_connections: usize,
+    active_connections: Arc<Mutex<usize>>,
+}
+
+impl ConnectionLimiter {
+    fn new(max_connections: usize) -> Self {
+        Self {
+            max_connections: max_connections.max(1),
+            active_connections: Arc::new(Mutex::new(0)),
+        }
+    }
+
+    fn try_acquire(&self) -> Option<ConnectionGuard> {
+        let mut active = self
+            .active_connections
+            .lock()
+            .expect("connection limiter mutex poisoned");
+        if *active >= self.max_connections {
+            return None;
+        }
+        *active += 1;
+        Some(ConnectionGuard {
+            active_connections: Arc::clone(&self.active_connections),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct ConnectionGuard {
+    active_connections: Arc<Mutex<usize>>,
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        let mut active = self
+            .active_connections
+            .lock()
+            .expect("connection limiter mutex poisoned");
+        *active = active.saturating_sub(1);
+    }
+}
+
+#[derive(Debug, Default)]
+struct RequestAuthTracker {
+    seen_nonces: Mutex<BTreeMap<RequestNonceKey, DateTime<Utc>>>,
+}
+
+impl RequestAuthTracker {
+    fn mark_nonce_once(&self, peer_id: &PeerId, nonce: &str, now: DateTime<Utc>) -> bool {
+        let mut seen = self
+            .seen_nonces
+            .lock()
+            .expect("request auth nonce mutex poisoned");
+        let oldest_allowed = now - ChronoDuration::seconds(REQUEST_SIGNATURE_MAX_SKEW_SECONDS);
+        seen.retain(|_, seen_at| *seen_at >= oldest_allowed);
+
+        let key = RequestNonceKey {
+            peer_id: peer_id.to_string(),
+            nonce: nonce.to_string(),
+        };
+        if seen.contains_key(&key) {
+            return false;
+        }
+        seen.insert(key, now);
+        true
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct RequestNonceKey {
+    peer_id: String,
+    nonce: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,6 +297,9 @@ struct RateLimitExceeded {
 }
 
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_SIGNATURE_MAX_SKEW_SECONDS: i64 = 300;
+const DEFAULT_MAX_CONNECTIONS: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct HttpRequest {
@@ -289,10 +388,13 @@ pub fn run_from_env() -> Result<()> {
     let data_dir = env_non_empty("AICHAN_DATA_DIR").unwrap_or_else(|| "/tmp/aichan-server".into());
     let public_base_url =
         env_non_empty("AICHAN_PUBLIC_BASE_URL").unwrap_or_else(|| format!("http://{addr}"));
-    let state = ServerState::with_public_base_url_and_rate_limits(
+    let state = ServerState::with_public_base_url_rate_limits_and_max_connections(
         data_dir,
         public_base_url,
         RateLimitConfig::from_env(),
+        env_usize("AICHAN_MAX_CONNECTIONS")
+            .unwrap_or(DEFAULT_MAX_CONNECTIONS)
+            .max(1),
     )?;
 
     run(&addr, state)
@@ -305,8 +407,30 @@ pub fn run(addr: &str, state: ServerState) -> Result<()> {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                let Some(connection_guard) = state.connection_limiter.try_acquire() else {
+                    log_event(
+                        "server.connection_rejected",
+                        json!({ "reason": "max_connections" }),
+                    );
+                    if let Err(error) = write_http_response(
+                        stream,
+                        error_response(
+                            503,
+                            "server_busy",
+                            "Server is at the configured connection limit.",
+                            true,
+                        ),
+                    ) {
+                        log_event(
+                            "server.connection_reject_failed",
+                            json!({ "error": error.to_string() }),
+                        );
+                    }
+                    continue;
+                };
                 let state = state.clone();
                 thread::spawn(move || {
+                    let _connection_guard = connection_guard;
                     if let Err(error) = handle_connection(stream, &state) {
                         log_event("request.failed", json!({ "error": error.to_string() }));
                     }
@@ -395,6 +519,10 @@ fn publish_record(state: &ServerState, request: &HttpRequest) -> HttpResponse {
         }
     };
 
+    let _store_guard = state
+        .publish_store_lock
+        .lock()
+        .expect("publish store mutex poisoned");
     let mut records = match load_publish_records(state) {
         Ok(records) => records,
         Err(error) => {
@@ -416,6 +544,14 @@ fn publish_record(state: &ServerState, request: &HttpRequest) -> HttpResponse {
                 409,
                 "conflict",
                 "Publish id already belongs to another peer.",
+                false,
+            );
+        }
+        if existing.deleted {
+            return error_response(
+                409,
+                "publish_deleted",
+                "Publish id was author-deleted and cannot be reused.",
                 false,
             );
         }
@@ -502,6 +638,10 @@ fn delete_publish_record(
     request: &HttpRequest,
     publish_id: &str,
 ) -> HttpResponse {
+    let _store_guard = state
+        .publish_store_lock
+        .lock()
+        .expect("publish store mutex poisoned");
     let mut records = match load_publish_records(state) {
         Ok(records) => records,
         Err(error) => {
@@ -544,6 +684,9 @@ fn delete_publish_record(
             false,
         );
     }
+    if let Some(response) = validate_request_auth_controls(state, &signature) {
+        return response;
+    }
     if signature.peer_id != records[index].object.payload.peer_id {
         return error_response(
             403,
@@ -575,6 +718,9 @@ fn request_signature_from_headers(request: &HttpRequest) -> Result<AichanRequest
         .context("invalid Aichan-Timestamp")?
         .with_timezone(&Utc);
     let nonce = required_header(request, "Aichan-Nonce")?.to_string();
+    if nonce.trim().is_empty() {
+        anyhow::bail!("empty Aichan-Nonce header");
+    }
     let value = required_header(request, "Aichan-Signature")?.to_string();
     let idempotency_key = request.header("Idempotency-Key").map(str::to_string);
 
@@ -588,6 +734,37 @@ fn request_signature_from_headers(request: &HttpRequest) -> Result<AichanRequest
         idempotency_key,
         value,
     })
+}
+
+fn validate_request_auth_controls(
+    state: &ServerState,
+    signature: &AichanRequestSignature,
+) -> Option<HttpResponse> {
+    let now = Utc::now();
+    let oldest_allowed = now - ChronoDuration::seconds(REQUEST_SIGNATURE_MAX_SKEW_SECONDS);
+    let newest_allowed = now + ChronoDuration::seconds(REQUEST_SIGNATURE_MAX_SKEW_SECONDS);
+    if signature.timestamp < oldest_allowed || signature.timestamp > newest_allowed {
+        return Some(error_response(
+            401,
+            "stale_request_signature",
+            "Request signature timestamp is outside the accepted replay window.",
+            false,
+        ));
+    }
+
+    if !state
+        .request_auth
+        .mark_nonce_once(&signature.peer_id, &signature.nonce, now)
+    {
+        return Some(error_response(
+            401,
+            "replayed_request_nonce",
+            "Request signature nonce has already been used in this replay window.",
+            false,
+        ));
+    }
+
+    None
 }
 
 fn required_header<'a>(request: &'a HttpRequest, name: &str) -> Result<&'a str> {
@@ -664,11 +841,16 @@ fn load_publish_records(state: &ServerState) -> Result<Vec<StoredPublishRecord>>
 
 fn save_publish_records(state: &ServerState, records: &[StoredPublishRecord]) -> Result<()> {
     let path = state.publish_store_path();
+    let temp_path = path.with_file_name("publish_records.json.tmp");
     let bytes = serde_json::to_vec_pretty(records)?;
-    std::fs::write(&path, bytes).with_context(|| format!("write {}", path.display()))
+    std::fs::write(&temp_path, bytes).with_context(|| format!("write {}", temp_path.display()))?;
+    std::fs::rename(&temp_path, &path)
+        .with_context(|| format!("rename {} to {}", temp_path.display(), path.display()))
 }
 
 fn handle_connection(mut stream: TcpStream, state: &ServerState) -> Result<()> {
+    stream.set_read_timeout(Some(REQUEST_READ_TIMEOUT))?;
+    stream.set_write_timeout(Some(REQUEST_READ_TIMEOUT))?;
     let response = match read_http_request(&mut stream, state.rate_limits().max_body_bytes)? {
         ReadHttpRequest::Request(request) => handle_request(state, request),
         ReadHttpRequest::PayloadTooLarge => error_response(
@@ -732,6 +914,7 @@ fn write_http_response(mut stream: TcpStream, response: HttpResponse) -> Result<
         403 => "Forbidden",
         404 => "Not Found",
         409 => "Conflict",
+        503 => "Service Unavailable",
         413 => "Payload Too Large",
         429 => "Too Many Requests",
         500 => "Internal Server Error",
@@ -868,4 +1051,20 @@ fn env_u32(name: &str) -> Option<u32> {
 
 fn env_usize(name: &str) -> Option<usize> {
     env_non_empty(name).and_then(|value| value.parse().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_limiter_rejects_after_limit_and_releases_on_drop() {
+        let limiter = ConnectionLimiter::new(1);
+        let first = limiter.try_acquire().expect("first connection allowed");
+
+        assert!(limiter.try_acquire().is_none());
+
+        drop(first);
+        assert!(limiter.try_acquire().is_some());
+    }
 }

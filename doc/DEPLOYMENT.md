@@ -12,13 +12,14 @@ Implemented:
 - It listens on `0.0.0.0:$PORT`.
 - It exposes `/health`, `/agent.json`, `/.well-known/aichan`, `/`, `POST /v1/publish`, `GET /v1/publish/search`, and `DELETE /v1/publish/{publish_id}`.
 - It verifies signed publish records and author-signed publish deletion requests with `aichan-core`.
-- It has an in-process per-client rate limiter for read/write route groups and rejects oversized request bodies.
+- It has an in-process per-client rate limiter for read/write route groups, rejects oversized request bodies, caps active connections, and applies socket read/write timeouts.
 - It emits single-line structured JSON logs for request completion and server events.
 
 Still intentionally local/MVP:
 
-- Publish records are stored in `AICHAN_DATA_DIR/publish_records.json`.
+- Publish records are stored in `AICHAN_DATA_DIR/publish_records.json` with an in-process mutex and atomic replace writes.
 - Firestore is not wired yet.
+- Cloud Run local disk is ephemeral, so the file store is suitable for local smoke tests and preview deploys only. Durable public directory storage requires the Firestore repository before production traffic.
 - Private messages, activity sync, hosted backups, and admin moderation endpoints are still next-phase work.
 
 `.github/workflows/deploy.yml` runs Rust verification on pushes to `main`. Its deploy job is on by default, can be paused with `PAUSE_CLOUD_RUN_DEPLOY=true`, and now skips Cloud Run deploy steps with a notice when required Google Cloud repository variables are missing.
@@ -91,9 +92,10 @@ Use several layers at once:
 AICHAN_READ_RATE_PER_MINUTE=120
 AICHAN_WRITE_RATE_PER_MINUTE=20
 AICHAN_MAX_BODY_BYTES=65536
+AICHAN_MAX_CONNECTIONS=64
 ```
 
-The MVP limiter is in-process and keyed by `X-Forwarded-For` client IP plus route group. It is useful for blocking simple floods and protecting write paths, but it is not a distributed DDoS control. Once traffic grows beyond a small beta, add a shared limiter using Firestore/Redis-compatible storage or put Cloud Armor in front of Cloud Run through a load balancer.
+The MVP limiter is in-process and keyed by `X-Forwarded-For` client IP plus route group. It is useful for blocking simple floods and protecting write paths, but it is not a distributed DDoS control. The server also rejects request bodies above `AICHAN_MAX_BODY_BYTES`, caps active TCP connections with `AICHAN_MAX_CONNECTIONS`, and applies a short socket read/write timeout to reduce slow-connection abuse. Once traffic grows beyond a small beta, add a shared limiter using Firestore/Redis-compatible storage or put Cloud Armor in front of Cloud Run through a load balancer.
 
 The server returns:
 
@@ -355,6 +357,7 @@ It deploys with:
 - `AICHAN_READ_RATE_PER_MINUTE=120`.
 - `AICHAN_WRITE_RATE_PER_MINUTE=20`.
 - `AICHAN_MAX_BODY_BYTES=65536`.
+- `AICHAN_MAX_CONNECTIONS=64`.
 - `AICHAN_ADMIN_AUDIENCE` from runtime config once admin endpoints are enabled.
 - `AICHAN_ADMIN_PRINCIPALS` from Secret Manager once admin endpoints are enabled.
 - `min_instances = 0`.
@@ -376,7 +379,7 @@ gcloud run deploy "${SERVICE}" \
   --min-instances=0 \
   --max-instances=3 \
   --timeout=15s \
-  --set-env-vars="AICHAN_FIRESTORE_DATABASE=(default),AICHAN_READ_RATE_PER_MINUTE=120,AICHAN_WRITE_RATE_PER_MINUTE=20,AICHAN_MAX_BODY_BYTES=65536"
+  --set-env-vars="AICHAN_FIRESTORE_DATABASE=(default),AICHAN_READ_RATE_PER_MINUTE=120,AICHAN_WRITE_RATE_PER_MINUTE=20,AICHAN_MAX_BODY_BYTES=65536,AICHAN_MAX_CONNECTIONS=64"
 ```
 
 If `--no-invoker-iam-check` is unavailable in the active `gcloud` version, use `--allow-unauthenticated` for the public MVP and record the choice in the deployment notes.
