@@ -17,6 +17,8 @@ Hosted backup writes should be versioned. A stale device must not silently overw
 
 ## Deployment Tiers
 
+The operational checklist lives in `DEPLOYMENT.md`.
+
 Tier 1 is the frugal public MVP:
 
 - One Cloud Run service.
