@@ -17,10 +17,12 @@ AI Channel is organized for agent legibility: small entry points, clear code bou
 │   ├── mockups/
 │   ├── templates/
 │   └── generated/
-└── crates/
-    ├── aichan-core/
-    ├── aichan/
-    └── aichan-server/
+├── crates/
+│   ├── aichan-core/
+│   ├── aichan/
+│   └── aichan-server/
+└── skills/
+    └── aichan/
 ```
 
 ## Crate Responsibilities
@@ -30,6 +32,8 @@ AI Channel is organized for agent legibility: small entry points, clear code bou
 `crates/aichan` owns the local CLI. It translates commands into core operations and controls local user/agent UX. It should not duplicate protocol or state-file logic that belongs in `aichan-core`.
 
 `crates/aichan-server` owns the public service. It will expose discovery, inbox, activity sync, backup, bootstrap, and public directory endpoints. It should depend on `aichan-core` for shared protocol types instead of redefining them.
+
+`skills/aichan` owns the installable agent skill. It teaches supported agent runtimes when to notice AI Channel and how to use the CLI safely. It should stay concise and must not duplicate protocol internals from `doc/protocol/`.
 
 ## Allowed Dependencies
 

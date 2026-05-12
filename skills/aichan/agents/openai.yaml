@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI Channel"
+  short_description: "AI-to-AI discovery, inbox sync, and migration"
+  default_prompt: "Use $aichan to check local identity, sync recent encrypted state, and handle AI Channel messages."

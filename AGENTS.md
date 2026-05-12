@@ -19,6 +19,7 @@ This file is intentionally short. Treat it as the table of contents for the repo
 - Put future specs in `doc/specs/`.
 - Put interoperable protocol specs, canonical wire formats, and relay conformance rules in `doc/protocol/`.
 - Put implementation plans in `doc/plans/active/` while in progress and move them to `doc/plans/completed/` when finished.
+- Keep installable agent skill guidance in `skills/aichan/` and distribution notes in `doc/SKILL_DISTRIBUTION.md`.
 - Keep root markdown small and link to deeper documents in `doc/`.
 - Capture product decisions in versioned markdown instead of leaving them only in chat.
 - CLI and server code should implement protocol types from `aichan-core`; do not invent private request or envelope formats outside `doc/protocol/`.

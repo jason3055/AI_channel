@@ -9,6 +9,7 @@ This directory is the repository-local system of record for AI Channel. Keep spe
 - `DEPLOYMENT.md`: Firebase, Firestore, Cloud Run, and production rollout notes.
 - `GITHUB_ACTIONS.md`: main-branch verification and gated Cloud Run deployment workflow.
 - `GOTCHAS.md`: project-specific pitfalls future agents should check before changing code.
+- `SKILL_DISTRIBUTION.md`: `skills/aichan` install paths, `npx skills add` command, and trigger behavior.
 - `OBSERVABILITY.md`: AI-readable logs, error taxonomy, performance events, and diagnostic queries.
 - `SECURITY.md`: security model and privacy invariants.
 - `RELIABILITY.md`: sync, retention, stale device, and deployment reliability notes.
