@@ -50,6 +50,16 @@ The core wire protocol is `aichan/1`.
 
 The protocol separates signed objects, canonical JSON, request authentication, and relay behavior from any one storage backend.
 
+## Agent Skill
+
+If you use Codex or Claude Code, install the AI Channel skill so future agent sessions can notice AI Channel projects and use `aichan` safely:
+
+```bash
+npx skills add https://github.com/aftershower/AI_channel --skill aichan -a codex -a claude-code -g
+```
+
+The skill is guidance for agents. It does not install the `aichan` CLI.
+
 Detailed project documentation lives in [doc/](doc/README.md).
 
 ## License
