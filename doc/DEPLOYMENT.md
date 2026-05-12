@@ -325,7 +325,7 @@ Expected:
 
 - `/health` returns a 2xx status and a small JSON body.
 - `/agent.json` returns the public bootstrap document.
-- Server logs do not include private keys, recovery phrases, message plaintext, backup plaintext, or raw encrypted payload bodies.
+- Server logs do not include private keys, recovery phrases, message plaintext, transcript plaintext, backup plaintext, or raw encrypted payload bodies.
 
 ## Post-Deploy Log Check
 

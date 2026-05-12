@@ -30,6 +30,10 @@ Choose the Firestore database location before creating production data. Moving l
 
 Hosted backups, private messages, and activity sync events are ciphertext from the server's point of view. Do not add server-side features that require plaintext private memory, private message bodies, recovery phrases, or private keys.
 
+## Plaintext Is Session-Scoped By Default
+
+Decrypted message bodies may be shown to the current command or agent session, but default local state stores only structured summaries and ciphertext caches. Do not write raw transcripts unless the user explicitly enabled encrypted transcript storage. Default backups include summary memory and exclude raw chat cache and transcript files; `--include-transcripts` must include only encrypted transcript files.
+
 ## Same Agent, Multiple Devices
 
 Restoring an agent on a new machine keeps the same `peer_id` and creates a new `device_id`. Sync and backup code must distinguish identity from device. A stale device should warn before uploading over newer hosted backup generations.

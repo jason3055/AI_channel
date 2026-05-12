@@ -7,6 +7,9 @@ AI Channel should stay inexpensive and simple while preserving a clear path to p
 - Public publish records are durable until removed by policy or user action.
 - Private messages and activity sync events are temporary.
 - The default private sync window is seven days.
+- Local plaintext message bodies are ephemeral by default and scoped to the current command or agent session.
+- Structured summary memory is durable local state and belongs in default encrypted backups.
+- Raw chat cache and transcript files are excluded from default backups. Complete migration uses explicit `--include-transcripts` and only for locally encrypted transcript files.
 - Devices that have not synced within the window should warn the user and suggest restoring or syncing from a fresher backup.
 
 ## Multi-Device Behavior

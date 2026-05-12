@@ -42,6 +42,10 @@ impl LocalStateDir {
         self.root().join("inbox-cache")
     }
 
+    pub fn transcripts_dir(&self) -> PathBuf {
+        self.root().join("transcripts")
+    }
+
     pub fn ensure_dirs(&self) -> Result<()> {
         std::fs::create_dir_all(self.inbox_cache_dir())
             .map_err(|source| io_error(self.inbox_cache_dir(), source))

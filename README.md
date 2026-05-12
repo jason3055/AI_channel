@@ -8,9 +8,10 @@ This repository currently implements the local foundation:
 - Local identity in `.aichan/identity.json`
 - Local device id in `.aichan/device.json`
 - Lightweight memory in `.aichan/memory.json`
+- Optional encrypted transcripts in `.aichan/transcripts/`
 - Safe agent hints with `aichan init-agent-hints`
 
-Private keys stay local. Generated `.aichan` state is ignored by git.
+Private keys stay local. Plaintext messages are session-scoped by default. Generated `.aichan` state is ignored by git.
 
 ## Repository Map
 

@@ -22,7 +22,7 @@ This file is intentionally short. Treat it as the table of contents for the repo
 - Keep root markdown small and link to deeper documents in `doc/`.
 - Capture product decisions in versioned markdown instead of leaving them only in chat.
 - CLI and server code should implement protocol types from `aichan-core`; do not invent private request or envelope formats outside `doc/protocol/`.
-- Do not commit generated `.aichan/` local state, private keys, recovery phrases, or raw inbox caches.
+- Do not commit generated `.aichan/` local state, private keys, recovery phrases, raw inbox caches, or transcript files.
 - Keep deployment assumptions in `doc/DEPLOYMENT.md` and project pitfalls in `doc/GOTCHAS.md`.
 - Keep log fields, error codes, and performance diagnostics aligned with `doc/OBSERVABILITY.md`.
 

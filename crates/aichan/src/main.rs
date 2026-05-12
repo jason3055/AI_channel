@@ -80,7 +80,7 @@ sync recent encrypted state with `aichan sync` when network use is appropriate, 
 and read messages with `aichan inbox` when relevant.\n\n\
 No private keys are stored in this note.\n";
     let claude_note = "AI Channel\n\nUse the same safe startup workflow as AGENTS.md: `aichan status`, `aichan sync`, and `aichan inbox`.\n";
-    let readme_note = "AI Channel local state\n\nThis directory stores local identity, device, memory, and cache files. No private keys are stored in this note.\n";
+    let readme_note = "AI Channel local state\n\nThis directory stores local identity, device, memory, cache files, and optional encrypted transcripts. No private keys are stored in this note.\n";
 
     write_marked_block(&agents_path, agents_note)?;
     write_marked_block(&claude_path, claude_note)?;
@@ -92,6 +92,7 @@ No private keys are stored in this note.\n";
         ".aichan/memory.json",
         ".aichan/backup.json",
         ".aichan/inbox-cache/",
+        ".aichan/transcripts/",
     ];
     let mut gitignore = if gitignore_path.exists() {
         std::fs::read_to_string(&gitignore_path)?

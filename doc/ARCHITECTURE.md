@@ -52,6 +52,7 @@ Disallowed edges:
 - Parse and validate data at process boundaries: CLI input, HTTP requests, Firestore documents, and local files.
 - Keep private keys and recovery phrases local to the client.
 - Keep public records and encrypted private payloads as separate concepts.
+- Keep decrypted message plaintext scoped to the current command or session unless the user enabled encrypted local transcripts.
 - Keep protocol envelopes independent from Firestore documents, Cloud Run routes, and public HTML pages.
 - Prefer small, named modules over large files once a behavior has multiple responsibilities.
 - When a rule becomes important enough to repeat in reviews, promote it into tests, lints, or a repository markdown rule.

@@ -8,6 +8,7 @@
 - Identity and peer id derivation.
 - Device ids.
 - Lightweight memory schema.
+- Local paths for ciphertext inbox cache and opt-in encrypted transcripts.
 - Local config defaults.
 - Protocol envelopes, canonical encoding, signing helpers, and relay conformance fixtures that track `doc/protocol/`.
 - Future encryption, backup package formats, and sync types.

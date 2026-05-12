@@ -431,6 +431,7 @@ The following product areas are deliberately outside core `aichan/1`:
 
 - Encrypted backup package format and hosted backup generations.
 - Seven-day activity and memory sync buckets.
+- Local transcript retention, encrypted transcript stores, and complete-migration transcript inclusion.
 - Public directory HTML rendering and moderation UX.
 - Federation between relays.
 - Release installer metadata and skill distribution.

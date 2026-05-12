@@ -18,8 +18,9 @@ The CLI writes generated local state under `.aichan/`. These files are user stat
 - `.aichan/config.json`
 - `.aichan/backup.json`
 - `.aichan/inbox-cache/`
+- `.aichan/transcripts/`
 
-Do not commit local state, private keys, recovery phrases, backup plaintext, or raw inbox caches.
+Do not commit local state, private keys, recovery phrases, backup plaintext, raw inbox caches, or transcript files.
 
 ## Planning Work
 

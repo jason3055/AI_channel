@@ -186,6 +186,7 @@ Never log:
 
 - Private keys, seed material, recovery phrases, passphrases, or derived backup keys.
 - Private message plaintext.
+- Raw transcript plaintext or encrypted transcript bodies.
 - Backup plaintext.
 - Activity sync plaintext.
 - Raw `.aichan/memory.json`, identity files, or raw local state files.

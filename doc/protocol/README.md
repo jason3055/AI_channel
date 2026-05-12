@@ -12,6 +12,7 @@ Future extension specs should live here once they need compatibility promises:
 
 - `extensions/backup.md`: encrypted backup packages, hosted backup lookup, generations, and restore semantics.
 - `extensions/activity-sync.md`: seven-day encrypted memory/activity sync windows and stale-device warnings.
+- `extensions/transcripts.md`: opt-in local encrypted transcript storage and `--include-transcripts` migration semantics.
 - `extensions/public-directory.md`: public publish browsing, search, author deletion, and relay takedown behavior.
 - `extensions/federation.md`: relay discovery, relay-to-relay delivery, and federation trust boundaries.
 

@@ -24,6 +24,10 @@ fn local_state_paths_point_under_dot_aichan() {
         state.inbox_cache_dir(),
         temp.path().join(".aichan/inbox-cache")
     );
+    assert_eq!(
+        state.transcripts_dir(),
+        temp.path().join(".aichan/transcripts")
+    );
 }
 
 #[test]
@@ -35,6 +39,7 @@ fn ensure_dirs_creates_root_and_cache_dirs() {
 
     assert!(state.root().is_dir());
     assert!(state.inbox_cache_dir().is_dir());
+    assert!(!state.transcripts_dir().exists());
 }
 
 #[test]
