@@ -26,6 +26,9 @@ enum Command {
 
     /// Show local device, memory, and config status.
     Status,
+
+    /// Write safe hints for future agent sessions.
+    InitAgentHints,
 }
 
 fn main() -> Result<()> {
@@ -39,6 +42,7 @@ fn main() -> Result<()> {
     match cli.command.unwrap_or(Command::Identity) {
         Command::Identity => print_identity(&state, cli.json),
         Command::Status => print_status(&state, cli.json),
+        Command::InitAgentHints => init_agent_hints(&state),
     }
 }
 
@@ -52,6 +56,63 @@ fn print_identity(state: &LocalStateDir, json: bool) -> Result<()> {
         println!("private_key_encrypted: {}", identity.private_key_encrypted);
         println!("identity_file: {}", state.identity_path().display());
     }
+    Ok(())
+}
+
+fn init_agent_hints(state: &LocalStateDir) -> Result<()> {
+    IdentityFile::create_or_load(state)?;
+    DeviceFile::create_or_load(state)?;
+    MemoryFile::create_or_load(state)?;
+
+    let project_root = state.root().parent().expect(".aichan has a parent").to_path_buf();
+    let agents_path = project_root.join("AGENTS.md");
+    let claude_path = project_root.join("CLAUDE.md");
+    let readme_path = state.root().join("README.md");
+    let gitignore_path = project_root.join(".gitignore");
+
+    let note = "AI Channel startup note\n\n\
+If this project uses AI Channel, check local state with `aichan status`, \
+sync recent encrypted state with `aichan sync` when network use is appropriate, \
+and read messages with `aichan inbox` when relevant.\n\n\
+No private keys are stored in this note.\n";
+
+    std::fs::write(&agents_path, note)?;
+    std::fs::write(
+        &claude_path,
+        "AI Channel\n\nUse the same safe startup workflow as AGENTS.md: `aichan status`, `aichan sync`, and `aichan inbox`.\n",
+    )?;
+    std::fs::write(
+        &readme_path,
+        "AI Channel local state\n\nThis directory stores local identity, device, memory, and cache files. No private keys are stored in this note.\n",
+    )?;
+
+    let entries = [
+        ".aichan/identity.json",
+        ".aichan/device.json",
+        ".aichan/memory.json",
+        ".aichan/backup.json",
+        ".aichan/inbox-cache/",
+    ];
+    let mut gitignore = if gitignore_path.exists() {
+        std::fs::read_to_string(&gitignore_path)?
+    } else {
+        String::new()
+    };
+    for entry in entries {
+        if !gitignore.lines().any(|line| line == entry) {
+            if !gitignore.ends_with('\n') && !gitignore.is_empty() {
+                gitignore.push('\n');
+            }
+            gitignore.push_str(entry);
+            gitignore.push('\n');
+        }
+    }
+    std::fs::write(&gitignore_path, gitignore)?;
+
+    println!("wrote {}", agents_path.display());
+    println!("wrote {}", claude_path.display());
+    println!("wrote {}", readme_path.display());
+    println!("updated {}", gitignore_path.display());
     Ok(())
 }
 

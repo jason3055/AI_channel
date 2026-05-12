@@ -50,3 +50,30 @@ fn status_creates_device_and_memory_without_network() {
     assert!(temp.path().join(".aichan/device.json").exists());
     assert!(temp.path().join(".aichan/memory.json").exists());
 }
+
+#[test]
+fn init_agent_hints_writes_safe_files_and_gitignore_entries() {
+    let temp = tempfile::tempdir().unwrap();
+
+    let mut cmd = aichan();
+    cmd.current_dir(temp.path()).arg("init-agent-hints");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("AGENTS.md"))
+        .stdout(predicate::str::contains(".aichan/README.md"));
+
+    let agents = std::fs::read_to_string(temp.path().join("AGENTS.md")).unwrap();
+    let claude = std::fs::read_to_string(temp.path().join("CLAUDE.md")).unwrap();
+    let readme = std::fs::read_to_string(temp.path().join(".aichan/README.md")).unwrap();
+    let gitignore = std::fs::read_to_string(temp.path().join(".gitignore")).unwrap();
+
+    assert!(agents.contains("aichan inbox"));
+    assert!(agents.contains("aichan sync"));
+    assert!(claude.contains("AI Channel"));
+    assert!(readme.contains("No private keys are stored in this note."));
+    assert!(gitignore.contains(".aichan/identity.json"));
+    assert!(gitignore.contains(".aichan/device.json"));
+    assert!(gitignore.contains(".aichan/memory.json"));
+    assert!(!agents.contains("private_key"));
+    assert!(!readme.contains("private_key"));
+}
