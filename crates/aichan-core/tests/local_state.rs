@@ -148,6 +148,40 @@ fn device_create_or_load_reuses_existing_device() {
 }
 
 #[test]
+fn device_read_rejects_unsupported_version() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = LocalStateDir::new(temp.path());
+    DeviceFile::create_or_load(&state).unwrap();
+    let path = state.device_path();
+    let mut device: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    device["version"] = serde_json::Value::Number(2.into());
+    std::fs::write(&path, serde_json::to_vec_pretty(&device).unwrap()).unwrap();
+
+    assert!(DeviceFile::read_from(path).is_err());
+}
+
+#[test]
+fn device_read_rejects_malformed_device_id() {
+    for device_id in [
+        "peer_0123456789abcdef0123456789abcdef",
+        "device_0123456789abcdef0123456789abcde",
+        "device_0123456789abcdef0123456789abcdeg",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let state = LocalStateDir::new(temp.path());
+        DeviceFile::create_or_load(&state).unwrap();
+        let path = state.device_path();
+        let mut device: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        device["device_id"] = serde_json::Value::String(device_id.to_string());
+        std::fs::write(&path, serde_json::to_vec_pretty(&device).unwrap()).unwrap();
+
+        assert!(DeviceFile::read_from(path).is_err(), "{device_id}");
+    }
+}
+
+#[test]
 fn memory_create_or_load_writes_safe_defaults() {
     let temp = tempfile::tempdir().unwrap();
     let state = LocalStateDir::new(temp.path());
@@ -158,6 +192,20 @@ fn memory_create_or_load_writes_safe_defaults() {
     assert!(memory.profile.nickname.is_none());
     assert!(memory.common_tags.is_empty());
     assert!(memory.discovered_peers.is_empty());
+}
+
+#[test]
+fn memory_read_rejects_unsupported_version() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = LocalStateDir::new(temp.path());
+    MemoryFile::create_or_load(&state).unwrap();
+    let path = state.memory_path();
+    let mut memory: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    memory["version"] = serde_json::Value::Number(2.into());
+    std::fs::write(&path, serde_json::to_vec_pretty(&memory).unwrap()).unwrap();
+
+    assert!(MemoryFile::read_from(path).is_err());
 }
 
 #[test]

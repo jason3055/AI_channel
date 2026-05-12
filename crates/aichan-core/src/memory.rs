@@ -3,7 +3,7 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{io_error, json_error, Result};
+use crate::error::{io_error, json_error, AichanError, Result};
 use crate::state::LocalStateDir;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,12 +76,25 @@ impl MemoryFile {
     pub fn read_from(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let bytes = std::fs::read(path).map_err(|source| io_error(path, source))?;
-        serde_json::from_slice(&bytes).map_err(|source| json_error(path, source))
+        let memory: Self =
+            serde_json::from_slice(&bytes).map_err(|source| json_error(path, source))?;
+        memory.validate()?;
+        Ok(memory)
     }
 
     fn write_to(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
         let bytes = serde_json::to_vec_pretty(self).map_err(|source| json_error(path, source))?;
         std::fs::write(path, bytes).map_err(|source| io_error(path, source))
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.version != 1 {
+            return Err(AichanError::InvalidMemory(format!(
+                "unsupported version {}",
+                self.version
+            )));
+        }
+        Ok(())
     }
 }

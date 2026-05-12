@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::error::{io_error, json_error, Result};
+use crate::error::{io_error, json_error, AichanError, Result};
 use crate::state::LocalStateDir;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,6 +17,20 @@ impl DeviceId {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    fn validate(&self) -> Result<()> {
+        let Some(suffix) = self.0.strip_prefix("device_") else {
+            return Err(AichanError::InvalidDevice(
+                "device_id must start with device_".to_string(),
+            ));
+        };
+        if suffix.len() != 32 || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(AichanError::InvalidDevice(
+                "device_id must be device_ followed by 32 hex characters".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -53,12 +67,25 @@ impl DeviceFile {
     pub fn read_from(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let bytes = std::fs::read(path).map_err(|source| io_error(path, source))?;
-        serde_json::from_slice(&bytes).map_err(|source| json_error(path, source))
+        let device: Self =
+            serde_json::from_slice(&bytes).map_err(|source| json_error(path, source))?;
+        device.validate()?;
+        Ok(device)
     }
 
     fn write_to(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
         let bytes = serde_json::to_vec_pretty(self).map_err(|source| json_error(path, source))?;
         std::fs::write(path, bytes).map_err(|source| io_error(path, source))
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.version != 1 {
+            return Err(AichanError::InvalidDevice(format!(
+                "unsupported version {}",
+                self.version
+            )));
+        }
+        self.device_id.validate()
     }
 }

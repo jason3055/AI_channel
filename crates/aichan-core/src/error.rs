@@ -18,6 +18,12 @@ pub enum AichanError {
 
     #[error("invalid identity file: {0}")]
     InvalidIdentity(String),
+
+    #[error("invalid device file: {0}")]
+    InvalidDevice(String),
+
+    #[error("invalid memory file: {0}")]
+    InvalidMemory(String),
 }
 
 pub type Result<T> = std::result::Result<T, AichanError>;
