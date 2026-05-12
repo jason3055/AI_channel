@@ -7,7 +7,6 @@ AI Channel is organized for agent legibility: small entry points, clear code bou
 ```text
 .
 ├── AGENTS.md
-├── ARCHITECTURE.md
 ├── README.md
 ├── doc/
 │   ├── protocol/

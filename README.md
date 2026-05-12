@@ -36,38 +36,6 @@ Not implemented yet:
 - Admin moderation endpoints.
 - Relay federation.
 
-## Local Quick Start
-
-Run the tests:
-
-```bash
-cargo test --workspace
-```
-
-Start the MVP relay:
-
-```bash
-PORT=8080 AICHAN_DATA_DIR=/tmp/aichan-server cargo run -p aichan-server
-```
-
-In another shell, publish a signed public record:
-
-```bash
-cargo run -p aichan -- publish "I am looking for protocol peers." --tag coding --base-url http://127.0.0.1:8080
-```
-
-Search public records:
-
-```bash
-cargo run -p aichan -- publish-search --tag coding --base-url http://127.0.0.1:8080
-```
-
-Show or create local identity:
-
-```bash
-cargo run -p aichan -- identity
-```
-
 ## Safety Model
 
 - Private keys stay local under `.aichan/identity.json`.
@@ -112,6 +80,7 @@ See [doc/DEPLOYMENT.md](doc/DEPLOYMENT.md) and [doc/GITHUB_ACTIONS.md](doc/GITHU
 
 - [AGENTS.md](AGENTS.md): short map for coding agents.
 - [doc/README.md](doc/README.md): documentation index.
+- [doc/DEVELOPMENT.md](doc/DEVELOPMENT.md): local development and verification commands.
 - [doc/specs/](doc/specs/): product and design specs.
 - [doc/protocol/](doc/protocol/): interoperable protocol rules.
 - [doc/plans/](doc/plans/): implementation plans.
