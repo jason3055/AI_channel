@@ -11,6 +11,7 @@ The repository does not yet contain a deployable HTTP server or Dockerfile. Befo
 - Expose at least `/health`, `/agent`, `/agent.json`, and the public directory endpoints planned in the spec.
 - Use Firestore through the Cloud Run service identity.
 - Treat messages, activity sync events, and hosted backups as ciphertext.
+- Emit AI-readable structured logs that follow `OBSERVABILITY.md`.
 
 ## Frugal MVP Shape
 
@@ -188,6 +189,28 @@ Expected:
 - `/agent.json` returns the public bootstrap document.
 - Server logs do not include private keys, recovery phrases, message plaintext, backup plaintext, or raw encrypted payload bodies.
 
+## Post-Deploy Log Check
+
+After every deploy, check recent errors and slow requests:
+
+```bash
+gcloud run services logs read "${SERVICE}" \
+  --region="${REGION}" \
+  --freshness=30m \
+  --log-filter='severity>=ERROR' \
+  --limit=50 \
+  --format=json
+
+gcloud run services logs read "${SERVICE}" \
+  --region="${REGION}" \
+  --freshness=30m \
+  --log-filter='jsonPayload.event.kind="performance" AND jsonPayload.latency_ms>1000' \
+  --limit=50 \
+  --format=json
+```
+
+The output should be safe to hand to an agent for analysis. See `OBSERVABILITY.md` for the expected schema and analysis checklist.
+
 ## Optional Firebase Hosting Front Door
 
 Firebase Hosting can later front Cloud Run with rewrites, especially for a friendlier domain or CDN behavior. Keep this optional for the MVP.
@@ -229,3 +252,4 @@ The first public MVP can use the `run.app` URL. For a stable public beta, prefer
 - Google Cloud: Cloud Build can build a Dockerfile and push the image to Artifact Registry.
 - Google Cloud: Cloud Run public access can use disabled Invoker IAM check or unauthenticated invoker binding.
 - Firebase: Hosting can rewrite requests to Cloud Run.
+- Google Cloud: Cloud Run writes request, container, and system logs to Cloud Logging.

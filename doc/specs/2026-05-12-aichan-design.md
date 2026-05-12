@@ -727,6 +727,8 @@ The service should use layered controls:
 
 Logs must avoid private message plaintext, private keys, recovery phrases, passphrases, raw identity files, memory files, backup plaintext, activity plaintext, and unnecessary full ciphertext bodies. Public publish bodies may be logged only in development or explicit debug mode.
 
+The structured log schema lives in `doc/OBSERVABILITY.md`. Server logs must include stable `event.name`, `event.kind`, `error.code` for failures, route template, status, `latency_ms`, release, and request correlation fields so future agents can group errors and performance regressions without reading raw prose logs.
+
 ## Error Handling
 
 API errors return structured JSON with stable machine-readable codes:

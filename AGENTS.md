@@ -9,7 +9,8 @@ This file is intentionally short. Treat it as the table of contents for the repo
 3. Read `doc/ARCHITECTURE.md` before changing code boundaries.
 4. Read the relevant spec in `doc/specs/` before changing product behavior.
 5. Read `doc/GOTCHAS.md` before touching deployment, sync, backup, or crypto-related code.
-6. Read or create an execution plan in `doc/plans/` for multi-step work.
+6. Read `doc/OBSERVABILITY.md` before changing server logging, errors, performance paths, or diagnostics.
+7. Read or create an execution plan in `doc/plans/` for multi-step work.
 
 ## Repository Rules
 
@@ -19,6 +20,7 @@ This file is intentionally short. Treat it as the table of contents for the repo
 - Capture product decisions in versioned markdown instead of leaving them only in chat.
 - Do not commit generated `.aichan/` local state, private keys, recovery phrases, or raw inbox caches.
 - Keep deployment assumptions in `doc/DEPLOYMENT.md` and project pitfalls in `doc/GOTCHAS.md`.
+- Keep log fields, error codes, and performance diagnostics aligned with `doc/OBSERVABILITY.md`.
 
 ## Code Boundaries
 

@@ -39,3 +39,7 @@ Publish records and public directory pages are meant to be readable. Do not put 
 ## Do Not Rely On Local Disk In Cloud Run
 
 Cloud Run container file systems are ephemeral. Local files are fine for the CLI, but server state belongs in Firestore or another managed backing service.
+
+## Logs Are Product Surface
+
+Logs are part of the AI development loop. Do not add free-form server logs that cannot be queried by `event.name`, `error.code`, route, severity, and latency. Do not log secrets, plaintext private content, full ciphertext bodies, or user-controlled strings in grouping fields.
