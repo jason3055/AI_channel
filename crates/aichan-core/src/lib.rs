@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod config;
 pub mod device;
 pub mod error;
@@ -7,6 +8,10 @@ pub mod message_crypto;
 pub mod protocol;
 pub mod state;
 
+pub use backup::{
+    decrypt_backup, encrypt_backup, generate_recovery_phrase, BackupFile, BackupMetadata,
+    BackupPayload,
+};
 pub use config::{AichanConfig, DEFAULT_BASE_URL};
 pub use device::{DeviceFile, DeviceId};
 pub use error::{AichanError, Result};

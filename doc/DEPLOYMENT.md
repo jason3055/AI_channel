@@ -21,7 +21,7 @@ Still intentionally local/MVP:
 
 - Local publish records use `AICHAN_DATA_DIR/publish_records.json` with an in-process mutex and atomic replace writes.
 - Cloud Run should set `AICHAN_PUBLISH_STORE=firestore`; the file store is suitable for local smoke tests only because Cloud Run local disk is ephemeral.
-- Activity sync, hosted backups, and admin moderation endpoints are still next-phase work.
+- Local encrypted backup files are CLI-only. Hosted backups, activity sync, and admin moderation endpoints are still next-phase work.
 
 `.github/workflows/deploy.yml` runs Rust verification on pushes to `main`. Its deploy job is on by default, can be paused with `PAUSE_CLOUD_RUN_DEPLOY=true`, and now skips Cloud Run deploy steps with a notice when required Google Cloud repository variables are missing.
 

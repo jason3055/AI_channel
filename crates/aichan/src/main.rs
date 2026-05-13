@@ -9,11 +9,13 @@ use aichan_core::protocol::{
     PublishRecordPayload, RequestToSign, SignedProtocolObject, UnsignedProtocolObject,
 };
 use aichan_core::{
+    decrypt_backup, encrypt_backup, generate_recovery_phrase,
     message_crypto::{
         decrypt_private_message, encrypt_private_message, message_encryption_aad,
         SealedPrivateMessage, MESSAGE_ENCRYPTION_SUITE,
     },
-    AichanConfig, DeviceFile, IdentityFile, LocalStateDir, MemoryFile, PeerId,
+    AichanConfig, BackupFile, BackupMetadata, BackupPayload, DeviceFile, IdentityFile,
+    LocalStateDir, MemoryFile, PeerId,
 };
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
@@ -60,6 +62,10 @@ enum Command {
 
     /// Fetch and decrypt encrypted private messages for this identity.
     Inbox(InboxArgs),
+
+    /// Create, restore, or inspect encrypted local backups.
+    #[command(subcommand)]
+    Backup(BackupCommand),
 }
 
 #[derive(Debug, Parser)]
@@ -141,6 +147,40 @@ struct InboxArgs {
     base_url: Option<String>,
 }
 
+#[derive(Debug, Subcommand)]
+enum BackupCommand {
+    /// Create a local encrypted backup package.
+    Create(BackupCreateArgs),
+
+    /// Restore a local encrypted backup package.
+    Restore(BackupRestoreArgs),
+
+    /// Show local backup metadata.
+    Status,
+}
+
+#[derive(Debug, Parser)]
+struct BackupCreateArgs {
+    /// Output backup file path. Defaults to a new aichan-backup-*.aichan-backup file.
+    #[arg(long)]
+    output: Option<PathBuf>,
+}
+
+#[derive(Debug, Parser)]
+struct BackupRestoreArgs {
+    /// Encrypted backup file path.
+    #[arg(long = "file")]
+    file: PathBuf,
+
+    /// Recovery phrase. Prefer AICHAN_RECOVERY_PHRASE to avoid shell history.
+    #[arg(long)]
+    recovery_phrase: Option<String>,
+
+    /// Overwrite existing identity, memory, and config files in this project.
+    #[arg(long)]
+    force: bool,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let project_dir = match cli.project_dir {
@@ -158,6 +198,7 @@ fn main() -> Result<()> {
         Command::PublishDelete(args) => publish_delete(&state, args, cli.json),
         Command::Send(args) => send_message(&state, args, cli.json),
         Command::Inbox(args) => inbox(&state, args, cli.json),
+        Command::Backup(command) => backup(&state, command, cli.json),
     }
 }
 
@@ -508,6 +549,158 @@ fn inbox(state: &LocalStateDir, args: InboxArgs, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn backup(state: &LocalStateDir, command: BackupCommand, json: bool) -> Result<()> {
+    match command {
+        BackupCommand::Create(args) => backup_create(state, args, json),
+        BackupCommand::Restore(args) => backup_restore(state, args, json),
+        BackupCommand::Status => backup_status(state, json),
+    }
+}
+
+fn backup_create(state: &LocalStateDir, args: BackupCreateArgs, json: bool) -> Result<()> {
+    let identity = IdentityFile::create_or_load(state)?;
+    let device = DeviceFile::create_or_load(state)?;
+    let memory = MemoryFile::create_or_load(state)?;
+    let config = Some(AichanConfig::load_or_default(state)?);
+    let recovery_phrase = generate_recovery_phrase();
+    let created_at = Utc::now();
+    let payload = BackupPayload {
+        version: 1,
+        peer_id: identity.peer_id.clone(),
+        source_device_id: device.device_id.clone(),
+        identity,
+        memory,
+        config,
+        created_at,
+    };
+    let backup = encrypt_backup(&payload, &recovery_phrase)?;
+    let output = args.output.unwrap_or_else(default_backup_path);
+    backup.write_to(&output)?;
+
+    let mut metadata = BackupMetadata::load_or_default(state)?;
+    metadata.last_local_backup_at = Some(created_at);
+    metadata.last_local_backup_path = Some(output.display().to_string());
+    metadata.write_to_state(state)?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "created": true,
+                "backup_file": output.display().to_string(),
+                "peer_id": payload.peer_id,
+                "source_device_id": payload.source_device_id,
+                "created_at": created_at,
+                "recovery_phrase": recovery_phrase,
+            }))?
+        );
+    } else {
+        println!("backup_file: {}", output.display());
+        println!("peer_id: {}", payload.peer_id);
+        println!("recovery_phrase: {recovery_phrase}");
+        println!("Store the recovery phrase somewhere safe. It is not saved locally.");
+    }
+    Ok(())
+}
+
+fn backup_restore(state: &LocalStateDir, args: BackupRestoreArgs, json: bool) -> Result<()> {
+    if restore_target_has_local_state(state) && !args.force {
+        return Err(anyhow!(
+            "refusing to overwrite existing .aichan state; rerun with --force to restore here"
+        ));
+    }
+    let recovery_phrase = recovery_phrase_from_args(args.recovery_phrase.as_deref())?;
+    let backup = BackupFile::read_from(&args.file)?;
+    let payload = decrypt_backup(&backup, &recovery_phrase)?;
+
+    state.ensure_dirs()?;
+    payload.identity.write_replace_to(state.identity_path())?;
+    payload.memory.write_to(state.memory_path())?;
+    if let Some(config) = &payload.config {
+        config.write_to(state.config_path())?;
+    }
+    let device = DeviceFile::create_fresh(state)?;
+
+    let restored_at = Utc::now();
+    let mut metadata = BackupMetadata::load_or_default(state)?;
+    metadata.last_restore_at = Some(restored_at);
+    metadata.last_restore_source = Some(args.file.display().to_string());
+    metadata.last_restored_peer_id = Some(payload.peer_id.clone());
+    metadata.write_to_state(state)?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "restored": true,
+                "backup_file": args.file.display().to_string(),
+                "peer_id": payload.peer_id,
+                "device_id": device.device_id,
+                "restored_at": restored_at,
+            }))?
+        );
+    } else {
+        println!("restored: true");
+        println!("peer_id: {}", payload.peer_id);
+        println!("device_id: {}", device.device_id.as_str());
+    }
+    Ok(())
+}
+
+fn backup_status(state: &LocalStateDir, json: bool) -> Result<()> {
+    let metadata = BackupMetadata::load_or_default(state)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "metadata_file": state.backup_metadata_path().display().to_string(),
+                "metadata": metadata,
+            }))?
+        );
+    } else {
+        println!(
+            "backup_metadata_file: {}",
+            state.backup_metadata_path().display()
+        );
+        match metadata.last_local_backup_at {
+            Some(timestamp) => println!("last_local_backup_at: {timestamp}"),
+            None => println!("last_local_backup_at: never"),
+        }
+        match metadata.last_restore_at {
+            Some(timestamp) => println!("last_restore_at: {timestamp}"),
+            None => println!("last_restore_at: never"),
+        }
+    }
+    Ok(())
+}
+
+fn recovery_phrase_from_args(value: Option<&str>) -> Result<String> {
+    value
+        .map(str::to_string)
+        .or_else(|| std::env::var("AICHAN_RECOVERY_PHRASE").ok())
+        .ok_or_else(|| {
+            anyhow!("missing recovery phrase; set AICHAN_RECOVERY_PHRASE or pass --recovery-phrase")
+        })
+}
+
+fn default_backup_path() -> PathBuf {
+    let filename = format!("aichan-backup-{}.aichan-backup", Uuid::new_v4().simple());
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(filename)
+}
+
+fn restore_target_has_local_state(state: &LocalStateDir) -> bool {
+    [
+        state.identity_path(),
+        state.device_path(),
+        state.memory_path(),
+        state.config_path(),
+    ]
+    .into_iter()
+    .any(|path| path.exists())
 }
 
 fn append_local_message_log(

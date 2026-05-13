@@ -82,13 +82,13 @@ impl MemoryFile {
         Ok(memory)
     }
 
-    fn write_to(&self, path: impl AsRef<Path>) -> Result<()> {
+    pub fn write_to(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
         let bytes = serde_json::to_vec_pretty(self).map_err(|source| json_error(path, source))?;
         std::fs::write(path, bytes).map_err(|source| io_error(path, source))
     }
 
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         if self.version != 1 {
             return Err(AichanError::InvalidMemory(format!(
                 "unsupported version {}",

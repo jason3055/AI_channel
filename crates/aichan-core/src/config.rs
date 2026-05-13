@@ -33,4 +33,10 @@ impl AichanConfig {
         let bytes = std::fs::read(path).map_err(|source| io_error(path, source))?;
         serde_json::from_slice(&bytes).map_err(|source| json_error(path, source))
     }
+
+    pub fn write_to(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        let bytes = serde_json::to_vec_pretty(self).map_err(|source| json_error(path, source))?;
+        std::fs::write(path, bytes).map_err(|source| io_error(path, source))
+    }
 }

@@ -123,6 +123,11 @@ impl IdentityFile {
         write_identity_file_replace(path, &bytes)
     }
 
+    pub fn write_replace_to(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.validate()?;
+        self.write_replace(path)
+    }
+
     fn validate(&self) -> Result<()> {
         if self.version != 1 {
             return Err(AichanError::InvalidIdentity(format!(

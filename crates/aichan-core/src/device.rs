@@ -64,6 +64,17 @@ impl DeviceFile {
         Ok(device)
     }
 
+    pub fn create_fresh(state: &LocalStateDir) -> Result<Self> {
+        state.ensure_dirs()?;
+        let device = Self {
+            version: 1,
+            device_id: DeviceId::new(),
+            created_at: Utc::now(),
+        };
+        device.write_to(state.device_path())?;
+        Ok(device)
+    }
+
     pub fn read_from(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let bytes = std::fs::read(path).map_err(|source| io_error(path, source))?;
