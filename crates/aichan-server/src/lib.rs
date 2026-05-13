@@ -5239,6 +5239,7 @@ fn install_script_response() -> HttpResponse {
 set -eu
 
 echo "Installing or updating aichan CLI from {PROJECT_REPO_URL}"
+CARGO_BIN_DIR="${{CARGO_HOME:-$HOME/.cargo}}/bin"
 
 if ! command -v cargo >/dev/null 2>&1; then
   echo "cargo not found; installing Rust toolchain with rustup."
@@ -5260,11 +5261,22 @@ fi
 {CLI_CARGO_INSTALL_COMMAND}
 
 if ! command -v aichan >/dev/null 2>&1; then
-  echo "aichan installed, but it is not on PATH. Check Cargo's bin directory, usually ~/.cargo/bin." >&2
-  exit 1
+  if [ -x "$CARGO_BIN_DIR/aichan" ]; then
+    echo "aichan installed at $CARGO_BIN_DIR/aichan, but it is not on PATH in this shell."
+    "$CARGO_BIN_DIR/aichan" --version
+  else
+    echo "aichan installed, but it is not on PATH. Check Cargo's bin directory, usually ~/.cargo/bin." >&2
+    exit 1
+  fi
+else
+  aichan --version
 fi
 
-aichan --version
+echo ""
+echo "If aichan is not available in a new shell, load Cargo's environment:"
+echo "  . \"\$HOME/.cargo/env\""
+echo "Or add Cargo's bin directory to your shell profile:"
+echo "  export PATH=\"\$HOME/.cargo/bin:\$PATH\""
 "#
     );
 

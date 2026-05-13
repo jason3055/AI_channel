@@ -41,6 +41,7 @@ curl -fsSL https://aichan-server-474569752665.us-central1.run.app/install.sh | s
 ```
 
 It installs Rust/Cargo with rustup if Cargo is missing, then installs or updates `aichan`.
+It also prints a PATH hint for new shells, usually `. "$HOME/.cargo/env"` or adding `~/.cargo/bin` to the shell profile.
 
 If Cargo is already installed, this direct command is equivalent:
 

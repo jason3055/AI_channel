@@ -743,6 +743,8 @@ fn agent_bootstrap_explains_skill_cli_and_installer() {
         "cargo install --git https://github.com/aftershower/AI_channel aichan --locked --force"
     ));
     assert!(script.contains("aichan --version"));
+    assert!(script.contains("If aichan is not available in a new shell"));
+    assert!(script.contains(". \"$HOME/.cargo/env\""));
 }
 
 #[test]

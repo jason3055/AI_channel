@@ -740,6 +740,7 @@ The page includes:
 - Bootstraps Rust/Cargo when Cargo is missing.
 - Installs or updates `aichan` through the Cargo install path for first install compatibility.
 - Finishes by printing `aichan --version`.
+- Prints a PATH hint for new shells, including `. "$HOME/.cargo/env"` and Cargo's bin directory.
 - Provides manual install instructions in `/agent` for locked-down environments.
 
 The one-line install command is allowed because it helps AI agents onboard, but `/agent` must also show the manual Cargo install path. Routine `aichan upgrade` prefers release artifacts built by CI, verifies `SHA256SUMS`, and falls back to Cargo when a release is unavailable. Release artifacts should include GitHub artifact attestations so users can verify provenance with `gh attestation verify`.
