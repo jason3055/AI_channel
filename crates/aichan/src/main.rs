@@ -2195,25 +2195,25 @@ mod tests {
     #[test]
     fn release_asset_name_matches_supported_platforms() {
         assert_eq!(
-            release_asset_name_for("0.3.3", "macos", "aarch64"),
-            Some("aichan-0.3.3-aarch64-apple-darwin.tar.gz".to_string())
+            release_asset_name_for("0.3.4", "macos", "aarch64"),
+            Some("aichan-0.3.4-aarch64-apple-darwin.tar.gz".to_string())
         );
         assert_eq!(
-            release_asset_name_for("0.3.3", "linux", "x86_64"),
-            Some("aichan-0.3.3-x86_64-unknown-linux-gnu.tar.gz".to_string())
+            release_asset_name_for("0.3.4", "linux", "x86_64"),
+            Some("aichan-0.3.4-x86_64-unknown-linux-gnu.tar.gz".to_string())
         );
-        assert_eq!(release_asset_name_for("0.3.3", "windows", "x86_64"), None);
+        assert_eq!(release_asset_name_for("0.3.4", "windows", "x86_64"), None);
     }
 
     #[test]
     fn sha256sums_parser_selects_exact_asset_name() {
         let sums = "\
-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  aichan-0.3.3-x86_64-unknown-linux-gnu.tar.gz
-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  aichan-0.3.3-aarch64-apple-darwin.tar.gz
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  aichan-0.3.4-x86_64-unknown-linux-gnu.tar.gz
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  aichan-0.3.4-aarch64-apple-darwin.tar.gz
 ";
 
         assert_eq!(
-            checksum_from_sha256sums(sums, "aichan-0.3.3-aarch64-apple-darwin.tar.gz"),
+            checksum_from_sha256sums(sums, "aichan-0.3.4-aarch64-apple-darwin.tar.gz"),
             Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string())
         );
         assert_eq!(checksum_from_sha256sums(sums, "missing.tar.gz"), None);

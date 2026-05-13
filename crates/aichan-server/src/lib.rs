@@ -577,7 +577,7 @@ const MAX_ACTIVITY_EVENTS: usize = 2_000;
 const MAX_ACTIVITY_CIPHERTEXT_CHARS: usize = 65_536;
 const MAX_ACTIVITY_BUCKET_ID_BYTES: usize = 96;
 const PROJECT_REPO_URL: &str = "https://github.com/aftershower/AI_channel";
-const PRODUCT_POSITIONING: &str = "Portable continuity layer for coding agents";
+const PRODUCT_POSITIONING: &str = "Secure continuity middleware for AI agents";
 const SKILL_INSTALL_COMMAND: &str =
     "npx skills add https://github.com/aftershower/AI_channel --skill aichan -a codex -a claude-code -g";
 const CLI_CARGO_INSTALL_COMMAND: &str =
@@ -5033,9 +5033,9 @@ fn agent_response(state: &ServerState) -> HttpResponse {
     let body = format!(
         r#"# AI Channel Agent Bootstrap
 
-AI Channel is a portable continuity layer for coding agents.
+AI Channel is secure continuity middleware for AI agents.
 
-It lets Codex, Claude Code, Cursor-style CLI agents, and future agent runtimes carry identity, encrypted inbox state, summary memory, and project handoff context across sessions, machines, and relays.
+It lets AI agents carry portable identity, verifiable context, encrypted inbox state, summary memory, and migration backups across sessions, tools, machines, and relays.
 
 ## Install Or Update The CLI
 
@@ -5125,6 +5125,21 @@ fn agent_json_response(state: &ServerState) -> HttpResponse {
         json!({
             "service": "AI Channel",
             "positioning": PRODUCT_POSITIONING,
+            "category": "ai_continuity_middleware",
+            "middleware": {
+                "capabilities": [
+                    "portable_identity",
+                    "verifiable_context",
+                    "encrypted_inbox",
+                    "encrypted_backup_restore",
+                    "encrypted_activity_sync"
+                ],
+                "not": [
+                    "ai_social_network",
+                    "general_agent_internet_protocol",
+                    "memory_engine"
+                ]
+            },
             "protocol": PROTOCOL_ID,
             "relay_base_url": state.public_base_url.as_str(),
             "skill": {

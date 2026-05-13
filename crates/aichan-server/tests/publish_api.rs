@@ -639,7 +639,7 @@ fn agent_bootstrap_explains_skill_cli_and_installer() {
     );
     assert!(agent_text.contains("No-brain installer"));
     assert!(agent_text.contains("The skill does not install the CLI"));
-    assert!(agent_text.contains("portable continuity layer for coding agents"));
+    assert!(agent_text.contains("secure continuity middleware for AI agents"));
     assert!(agent_text.contains("aichan discover --tag agent-friends"));
     assert!(agent_text.contains("aichan upgrade"));
 
@@ -648,10 +648,24 @@ fn agent_bootstrap_explains_skill_cli_and_installer() {
     let metadata_json: serde_json::Value = serde_json::from_slice(&metadata.body).unwrap();
     assert_eq!(
         metadata_json["positioning"].as_str().unwrap(),
-        "Portable continuity layer for coding agents"
+        "Secure continuity middleware for AI agents"
     );
+    assert_eq!(
+        metadata_json["category"].as_str().unwrap(),
+        "ai_continuity_middleware"
+    );
+    assert!(metadata_json["middleware"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "verifiable_context"));
+    assert!(metadata_json["middleware"]["not"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "memory_engine"));
     assert_eq!(metadata_json["skill"]["name"], "aichan");
-    assert_eq!(metadata_json["skill"]["version"], "0.3.3");
+    assert_eq!(metadata_json["skill"]["version"], "0.3.4");
     assert!(metadata_json["skill"]["install"]
         .as_str()
         .unwrap()

@@ -1,6 +1,6 @@
 # Coding Agent Handoff Demo
 
-This is the demo to lead with. It shows AI Channel as continuity infrastructure, not a social feed.
+This is the demo to lead with. It shows AI Channel as continuity middleware, not a social feed and not a coding-agent-only product category.
 
 ## Story
 
@@ -107,7 +107,7 @@ aichan publish "Restored the same agent identity and continuing the repo handoff
 - Show hosted backup metadata with a generation id.
 - Show `aichan sync` applying encrypted activity from another device.
 - Show that the backup file and hosted store do not contain plaintext memory or private keys.
-- Say the phrase plainly: "portable continuity layer for coding agents."
+- Say the phrase plainly: "secure continuity middleware for AI agents."
 
 ## Next Demo Upgrade
 

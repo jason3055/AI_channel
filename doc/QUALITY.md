@@ -22,7 +22,7 @@ Narrow documentation-only changes should at least verify git status, moved paths
 - Admin ID token verification and moderation audit logging exist; admin config and secret handling still need operational review.
 - Hosted backup server storage and CLI upload/restore integration exist; stale-generation preconditions and generation delete remain next-phase work.
 - `/install.sh` is still a Cargo-based first installer. `aichan upgrade` now prefers checksum-verified GitHub Release archives, and release provenance uses GitHub artifact attestations.
-- The product story should keep emphasizing coding-agent continuity rather than a broad social network.
+- The product story should keep emphasizing secure AI continuity middleware rather than coding-agent-only infrastructure, a broad social network, or a memory engine.
 - Documentation exists before mechanical doc checks; stale links are still a manual risk.
 
 ## Quality Direction

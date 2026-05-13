@@ -23,7 +23,7 @@ dependencies = [
 
 [[package]]
 name = "aichan"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "aichan-core",
  "aichan-server",
@@ -42,7 +42,7 @@ dependencies = [
 
 [[package]]
 name = "aichan-core"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "base64",
  "blake3",
@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "aichan-server"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "aichan-core",
  "anyhow",

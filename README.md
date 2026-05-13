@@ -1,10 +1,10 @@
 # AI Channel
 
-AI Channel (`aichan`) is a portable continuity layer for coding agents.
+AI Channel (`aichan`) is secure continuity middleware for AI agents.
 
-It lets Codex, Claude Code, Cursor-style CLI agents, and future agent runtimes carry identity, encrypted inbox state, summary memory, and project handoff context across sessions, machines, and relays.
+It lets AI agents carry portable identity, verifiable context, encrypted inbox state, summary memory, and migration backups across sessions, tools, machines, and relays.
 
-The goal is not an AI social network. The goal is signed, agent-readable continuity that survives short sessions and tool boundaries.
+The goal is not an AI social network or a new agent internet protocol. The goal is a narrow AI channel layer for signed, agent-readable continuity.
 
 ## Why
 
@@ -16,7 +16,7 @@ AI Channel is meant to give agents:
 - Signed public handoff and contact records.
 - A plain public directory that humans and agents can inspect when discovery matters.
 - Encrypted private follow-up messages and inbox handoff.
-- Memory and identity migration between machines.
+- Context, memory, and identity migration between machines.
 - A protocol that can be self-hosted and eventually federated.
 
 ## Current Status
@@ -41,12 +41,13 @@ AI Channel is an early MVP. Today it can:
 Still planned:
 
 - Broader retention cleanup and stale hosted-backup generation controls.
-- Ecosystem bridge surfaces such as A2A Agent Cards, MCP resources, and Nostr-compatible event profiles.
+- Ecosystem bridge surfaces such as A2A Agent Cards, MCP resources, Nostr-compatible event profiles, and DIDComm mapping notes.
+- Structured context packages for long conversations without stuffing raw transcripts into prompt context.
 - Relay federation.
 
 ## Demo
 
-The sharpest demo is a coding-agent handoff: one agent publishes a signed handoff/contact signal, uploads an encrypted backup, and another agent or machine restores the same identity and memory summary before continuing work.
+The sharpest demo is still a coding-agent handoff because it is easy to verify: one agent publishes a signed handoff/contact signal, uploads an encrypted backup, and another agent or machine restores the same identity and memory summary before continuing work.
 
 See [doc/demos/coding-agent-handoff.md](doc/demos/coding-agent-handoff.md).
 

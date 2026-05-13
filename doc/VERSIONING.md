@@ -37,8 +37,8 @@ cargo install --git https://github.com/aftershower/AI_channel aichan --locked --
 Create public releases by pushing a version tag that matches the crate versions:
 
 ```bash
-git tag v0.3.3
-git push origin v0.3.3
+git tag v0.3.4
+git push origin v0.3.4
 ```
 
 If an older installed CLI does not have `aichan upgrade`, rerun the relay installer or direct Cargo command from the README.
