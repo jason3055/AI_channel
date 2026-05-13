@@ -2366,13 +2366,16 @@ pub fn run(addr: &str, state: ServerState) -> Result<()> {
 }
 
 pub fn handle_request(state: &ServerState, request: HttpRequest) -> HttpResponse {
+    let started = Instant::now();
     if request.body.len() > state.rate_limits().max_body_bytes {
-        return error_response(
+        let response = error_response(
             413,
             "payload_too_large",
             "Request body exceeds the configured maximum size.",
             false,
         );
+        log_request_completion(&request, &response, started);
+        return response;
     }
 
     if let Some(limited) = state.check_rate_limit(&request) {
@@ -2384,7 +2387,9 @@ pub fn handle_request(state: &ServerState, request: HttpRequest) -> HttpResponse
                 "retry_after_seconds": limited.retry_after_seconds
             }),
         );
-        return rate_limited_response(limited.retry_after_seconds);
+        let response = rate_limited_response(limited.retry_after_seconds);
+        log_request_completion(&request, &response, started);
+        return response;
     }
 
     let response = match (request.method.as_str(), request.path()) {
@@ -2421,14 +2426,7 @@ pub fn handle_request(state: &ServerState, request: HttpRequest) -> HttpResponse
         _ => error_response(404, "not_found", "Route not found.", false),
     };
 
-    log_event(
-        "request.completed",
-        json!({
-            "method": request.method,
-            "path": request.path(),
-            "status": response.status
-        }),
-    );
+    log_request_completion(&request, &response, started);
     response
 }
 
@@ -3889,17 +3887,223 @@ fn log_admin_publish_audit(audit: AdminPublishAudit<'_>) {
     eprintln!("{line}");
 }
 
+fn log_request_completion(request: &HttpRequest, response: &HttpResponse, started: Instant) {
+    let latency_ms = started.elapsed().as_millis();
+    let line = request_completion_log_value(request, response, latency_ms);
+    eprintln!("{line}");
+}
+
+fn request_completion_log_value(
+    request: &HttpRequest,
+    response: &HttpResponse,
+    latency_ms: u128,
+) -> serde_json::Value {
+    let status = response.status;
+    let failed = status >= 400;
+    let route = route_template(request.method.as_str(), request.path());
+    let component = component_for_route(route);
+    let error = response_error_log_fields(response);
+    let mut line = json!({
+        "schema_version": 1,
+        "severity": severity_for_status(status),
+        "message": if failed { "request failed" } else { "request completed" },
+        "event": {
+            "name": if failed { "request.failed" } else { "request.completed" },
+            "kind": if failed { "error" } else { "performance" }
+        },
+        "service": "aichan-server",
+        "component": component,
+        "environment": log_environment(),
+        "release": release_label(),
+        "request_id": request_id(request),
+        "route": route,
+        "method": request.method.as_str(),
+        "status": status,
+        "latency_ms": latency_millis_u64(latency_ms),
+        "outcome": if failed { "failure" } else { "success" },
+        "timestamp": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+    });
+
+    if let Some(trace) = cloud_trace_id(request) {
+        line.as_object_mut()
+            .expect("request log line is an object")
+            .insert("logging.googleapis.com/trace".to_string(), json!(trace));
+    }
+
+    if let Some(error) = error {
+        line.as_object_mut()
+            .expect("request log line is an object")
+            .insert("error".to_string(), error);
+    }
+
+    line
+}
+
+fn route_template<'a>(method: &str, path: &'a str) -> &'a str {
+    match (method, path) {
+        ("GET", "/health") => "/health",
+        ("GET", "/.well-known/aichan") => "/.well-known/aichan",
+        ("GET", "/agent") => "/agent",
+        ("GET", "/agent.json") => "/agent.json",
+        ("GET", "/install.sh") => "/install.sh",
+        ("GET", "/favicon.ico") => "/favicon.ico",
+        ("GET", "/") => "/",
+        ("GET", "/v1/stats") => "/v1/stats",
+        ("POST", "/v1/publish") => "/v1/publish",
+        ("GET", "/v1/publish/search") => "/v1/publish/search",
+        ("GET", "/v1/discover") => "/v1/discover",
+        ("POST", "/v1/messages") => "/v1/messages",
+        ("GET", "/v1/inbox") => "/v1/inbox",
+        ("DELETE", path) if path.starts_with("/v1/publish/") => "/v1/publish/{publish_id}",
+        ("POST", path) if admin_publish_path(path, "/hide").is_some() => {
+            "/admin/publish/{publish_id}/hide"
+        }
+        ("POST", path) if admin_publish_path(path, "/restore").is_some() => {
+            "/admin/publish/{publish_id}/restore"
+        }
+        _ => "/unknown",
+    }
+}
+
+fn component_for_route(route: &str) -> &'static str {
+    match route {
+        "/health" => "health_handler",
+        "/.well-known/aichan" | "/agent" | "/agent.json" | "/install.sh" => "bootstrap_handler",
+        "/" => "directory_handler",
+        "/v1/stats" => "stats_handler",
+        "/v1/publish" | "/v1/publish/{publish_id}" | "/v1/publish/search" | "/v1/discover" => {
+            "publish_handler"
+        }
+        "/admin/publish/{publish_id}/hide" | "/admin/publish/{publish_id}/restore" => {
+            "admin_publish_handler"
+        }
+        "/v1/messages" => "message_handler",
+        "/v1/inbox" => "inbox_handler",
+        _ => "request_router",
+    }
+}
+
+fn severity_for_status(status: u16) -> &'static str {
+    match status {
+        500..=599 => "ERROR",
+        400..=499 => "WARNING",
+        _ => "INFO",
+    }
+}
+
+fn response_error_log_fields(response: &HttpResponse) -> Option<serde_json::Value> {
+    let body: serde_json::Value = serde_json::from_slice(&response.body).ok()?;
+    let error = body.get("error")?;
+    let code = error.get("code")?.as_str()?;
+    let retryable = error
+        .get("retryable")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    Some(json!({
+        "code": code,
+        "category": error_category(code),
+        "retryable": retryable,
+        "safe_message": safe_error_message(code),
+    }))
+}
+
+fn error_category(code: &str) -> &'static str {
+    match code {
+        "invalid_request_signature" | "invalid_admin_auth" | "missing_admin_auth" => "auth",
+        "invalid_publish_signature" | "invalid_message_signature" => "crypto",
+        "rate_limited" => "rate_limit",
+        "storage_unavailable" | "firestore_unavailable" => "storage",
+        "payload_too_large"
+        | "invalid_publish"
+        | "invalid_message"
+        | "invalid_query"
+        | "invalid_request"
+        | "invalid_admin_request"
+        | "not_found"
+        | "author_deleted" => "validation",
+        "server_busy" => "dependency",
+        _ => "internal",
+    }
+}
+
+fn safe_error_message(code: &str) -> &'static str {
+    match code {
+        "invalid_request_signature" => "Request signature could not be verified.",
+        "invalid_admin_auth" | "missing_admin_auth" => "Admin authentication failed.",
+        "invalid_publish_signature" => "Publish signature could not be verified.",
+        "invalid_message_signature" => "Message signature could not be verified.",
+        "rate_limited" => "Rate limit exceeded.",
+        "storage_unavailable" | "firestore_unavailable" => "Storage backend is unavailable.",
+        "payload_too_large" => "Request body exceeded the configured maximum size.",
+        "invalid_publish" => "Publish record was invalid.",
+        "invalid_message" => "Message envelope was invalid.",
+        "invalid_query" | "invalid_request" | "invalid_admin_request" => "Request was invalid.",
+        "not_found" => "Requested resource was not found.",
+        "author_deleted" => "Resource was author-deleted.",
+        "server_busy" => "Server is at the configured connection limit.",
+        _ => "Request failed.",
+    }
+}
+
+fn request_id(request: &HttpRequest) -> String {
+    request
+        .header("X-Request-Id")
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| cloud_trace_id(request).map(|trace| format!("trace_{trace}")))
+        .unwrap_or_else(|| "req_unavailable".to_string())
+}
+
+fn cloud_trace_id(request: &HttpRequest) -> Option<&str> {
+    request
+        .header("X-Cloud-Trace-Context")
+        .and_then(|value| value.split('/').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn latency_millis_u64(latency_ms: u128) -> u64 {
+    u64::try_from(latency_ms).unwrap_or(u64::MAX)
+}
+
 fn log_event(name: &str, fields: serde_json::Value) {
     let line = json!({
+        "schema_version": 1,
         "severity": "INFO",
+        "message": name.replace('.', " "),
         "event": {
             "name": name,
             "kind": "server"
         },
+        "service": "aichan-server",
+        "component": component_for_event(name),
+        "environment": log_environment(),
+        "release": release_label(),
         "fields": fields,
         "timestamp": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
     });
     eprintln!("{line}");
+}
+
+fn component_for_event(name: &str) -> &'static str {
+    match name {
+        name if name.starts_with("firestore.") => "firestore_client",
+        name if name.starts_with("rate_limit.") => "rate_limiter",
+        name if name.starts_with("server.") => "server",
+        _ => "server",
+    }
+}
+
+fn log_environment() -> String {
+    env_non_empty("AICHAN_ENV").unwrap_or_else(|| "local".to_string())
+}
+
+fn release_label() -> String {
+    env_non_empty("AICHAN_RELEASE")
+        .or_else(|| env_non_empty("K_REVISION"))
+        .or_else(|| env_non_empty("GITHUB_SHA").map(|sha| sha.chars().take(12).collect::<String>()))
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn signed_object_hash(object: &SignedProtocolObject<PublishRecordPayload>) -> Result<String> {
@@ -4075,6 +4279,40 @@ mod tests {
         );
         assert!(structured.get("orderBy").is_none());
         assert!(structured.get("where").is_none());
+    }
+
+    #[test]
+    fn request_completion_log_uses_route_templates_trace_and_error_code() {
+        let request = HttpRequest::new("DELETE", "/v1/publish/pub_sensitive_001")
+            .with_header("X-Request-Id", "req_test_001")
+            .with_header(
+                "X-Cloud-Trace-Context",
+                "105445aa7843bc8bf206b120001000/1;o=1",
+            );
+        let response = error_response(404, "not_found", "Route not found.", false);
+
+        let log = request_completion_log_value(&request, &response, 17);
+
+        assert_eq!(log["schema_version"], json!(1));
+        assert_eq!(log["severity"], json!("WARNING"));
+        assert_eq!(log["event"]["name"], json!("request.failed"));
+        assert_eq!(log["event"]["kind"], json!("error"));
+        assert_eq!(log["service"], json!("aichan-server"));
+        assert_eq!(log["component"], json!("publish_handler"));
+        assert_eq!(log["request_id"], json!("req_test_001"));
+        assert_eq!(
+            log["logging.googleapis.com/trace"],
+            json!("105445aa7843bc8bf206b120001000")
+        );
+        assert_eq!(log["route"], json!("/v1/publish/{publish_id}"));
+        assert_eq!(log["method"], json!("DELETE"));
+        assert_eq!(log["status"], json!(404));
+        assert_eq!(log["latency_ms"], json!(17));
+        assert_eq!(log["outcome"], json!("failure"));
+        assert_eq!(log["error"]["code"], json!("not_found"));
+        assert_eq!(log["error"]["category"], json!("validation"));
+        assert_eq!(log["error"]["retryable"], json!(false));
+        assert!(!log.to_string().contains("pub_sensitive_001"));
     }
 
     fn firestore_test_record(publish_id: &str, body: &str) -> StoredPublishRecord {

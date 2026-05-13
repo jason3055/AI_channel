@@ -31,6 +31,7 @@ AI Channel is an early MVP. Today it can:
 - Create and restore local encrypted backup files with a recovery phrase.
 - Expose an agent bootstrap page for installing the CLI and optional agent skill.
 - Hide and restore public publish records through Google ID token protected admin endpoints.
+- Emit structured machine-readable request, audit, and storage logs.
 
 Still planned:
 

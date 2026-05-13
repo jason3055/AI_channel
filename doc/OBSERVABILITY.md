@@ -329,13 +329,10 @@ When an agent reads logs, it should produce:
 
 ## Implementation Direction
 
-When `aichan-server` becomes an HTTP service, prefer Rust `tracing` with JSON output and request spans. The first implementation should include:
+`aichan-server` emits JSON request, admin-audit, and Firestore storage events. The current request log creates or reads `request_id`, extracts `X-Cloud-Trace-Context`, records route templates, latency, status, outcome, and structured error codes. The next implementation should include:
 
-- Middleware that creates or reads `request_id`.
-- Middleware that extracts `X-Cloud-Trace-Context`.
-- One completion event per request.
-- One structured error event per failed request.
 - Firestore repository spans or timing fields around each query.
 - Redaction helpers for anything user-controlled or sensitive.
+- Broader route-specific slow-request thresholds.
 
 OpenTelemetry traces can come after structured logs. The log schema should already use names that map cleanly to OpenTelemetry semantic conventions.

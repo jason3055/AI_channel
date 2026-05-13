@@ -16,10 +16,10 @@ Narrow documentation-only changes should at least verify git status, moved paths
 
 ## Current Risk Areas
 
-- End-to-end encrypted private messages are not implemented yet.
-- Firestore-backed publish storage exists; private message, sync, backup, and moderation repositories are still not implemented.
-- AI-readable structured logging is documented but not implemented yet.
-- Admin ID token verification and moderation audit logging are documented but not implemented yet.
+- Private messaging is envelope-based MVP; sync, backup integration, and retention cleanup are still risk areas.
+- Firestore-backed publish and private-message storage exists; sync and hosted backup repositories are still not implemented.
+- AI-readable structured request, audit, and storage logs exist; dependency span coverage should keep expanding.
+- Admin ID token verification and moderation audit logging exist; admin config and secret handling still need operational review.
 - Hosted backup and activity sync are not implemented yet.
 - `/install.sh` is an early Cargo-based installer. Signed binary releases and checksum verification are not implemented yet.
 - Documentation exists before mechanical doc checks; stale links are still a manual risk.
