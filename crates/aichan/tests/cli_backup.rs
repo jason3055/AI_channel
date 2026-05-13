@@ -168,6 +168,43 @@ fn backup_restore_rejects_wrong_recovery_phrase_without_writing_identity() {
 }
 
 #[test]
+fn backup_create_upload_failure_still_prints_recovery_phrase_and_local_backup() {
+    let source = tempfile::tempdir().unwrap();
+    let backup_path = source.path().join("agent.aichan-backup");
+
+    let output = aichan()
+        .current_dir(source.path())
+        .args([
+            "--json",
+            "backup",
+            "create",
+            "--upload",
+            "--base-url",
+            "http://127.0.0.1:9",
+            "--output",
+            backup_path.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value["created"], true);
+    assert_eq!(value["hosted"]["uploaded"], false);
+    assert!(value["hosted"]["upload_error"]
+        .as_str()
+        .unwrap()
+        .contains("request PUT"));
+    assert!(value["recovery_phrase"]
+        .as_str()
+        .unwrap()
+        .starts_with("aichan-rp-"));
+    assert!(backup_path.exists());
+}
+
+#[test]
 fn backup_create_upload_and_hosted_restore_round_trip_same_peer_with_new_device() {
     let (server_dir, base_url) = start_test_server();
     let source = tempfile::tempdir().unwrap();

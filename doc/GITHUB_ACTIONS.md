@@ -8,6 +8,8 @@ AI Channel deploys from `main` by default once the server is actually deployable
 
 `.github/workflows/release.yml` starts on pushed tags that match `v*.*.*`. It verifies the Rust workspace, builds `aichan` release archives for supported macOS/Linux targets, writes `SHA256SUMS`, creates GitHub artifact attestations, and publishes a GitHub Release.
 
+Before publishing, the release workflow verifies that the tag version matches the three Rust crate versions and the corresponding package entries in `Cargo.lock`.
+
 The deploy job is on by default. It is skipped only when this repository variable is set:
 
 ```text
@@ -33,6 +35,7 @@ push to main
   -> changed-path check
   -> if only docs/non-code changed, skip Rust verification and Cloud Run deploy
   -> cargo fmt --all -- --check
+  -> check tag, crate, and Cargo.lock version alignment
   -> cargo test --workspace
   -> cargo clippy --workspace --all-targets -- -D warnings
   -> Google OIDC / Workload Identity Federation
@@ -44,6 +47,7 @@ push to main
 
 ```text
 push tag vX.Y.Z
+  -> check tag, crate, and Cargo.lock version alignment
   -> cargo fmt --all -- --check
   -> cargo test --workspace
   -> cargo clippy --workspace --all-targets -- -D warnings

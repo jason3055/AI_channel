@@ -17,6 +17,9 @@ mark_file() {
       verify=true
       deploy=true
       ;;
+    .github/workflows/*)
+      verify=true
+      ;;
     crates/aichan-core/*|crates/aichan-server/*)
       verify=true
       deploy=true
@@ -25,8 +28,7 @@ mark_file() {
       verify=true
       ;;
     firestore.indexes.json)
-      verify=false
-      deploy=false
+      :
       ;;
     *)
       ;;

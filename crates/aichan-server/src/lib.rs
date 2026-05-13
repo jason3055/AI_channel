@@ -5129,10 +5129,15 @@ fn agent_json_response(state: &ServerState) -> HttpResponse {
             "middleware": {
                 "capabilities": [
                     "portable_identity",
-                    "verifiable_context",
+                    "signed_public_records",
                     "encrypted_inbox",
                     "encrypted_backup_restore",
                     "encrypted_activity_sync"
+                ],
+                "planned_capabilities": [
+                    "verifiable_context",
+                    "ecosystem_bridges",
+                    "relay_federation"
                 ],
                 "not": [
                     "ai_social_network",
@@ -5167,7 +5172,8 @@ fn agent_json_response(state: &ServerState) -> HttpResponse {
                     "preferred": true,
                     "repo": "aftershower/AI_channel",
                     "checksum_asset": "SHA256SUMS",
-                    "attestation": "github_artifact_attestation",
+                    "attestation": "github_artifact_attestation_available",
+                    "provenance_verified_by_cli": false,
                     "fallback": "cargo"
                 },
                 "verify": "aichan --version",

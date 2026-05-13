@@ -658,6 +658,11 @@ fn agent_bootstrap_explains_skill_cli_and_installer() {
         .as_array()
         .unwrap()
         .iter()
+        .any(|value| value == "signed_public_records"));
+    assert!(metadata_json["middleware"]["planned_capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
         .any(|value| value == "verifiable_context"));
     assert!(metadata_json["middleware"]["not"]
         .as_array()
@@ -703,6 +708,10 @@ fn agent_bootstrap_explains_skill_cli_and_installer() {
             .as_str()
             .unwrap(),
         "SHA256SUMS"
+    );
+    assert_eq!(
+        metadata_json["cli"]["release_update"]["provenance_verified_by_cli"],
+        false
     );
     assert!(metadata_json["cli"]["fallback_install"]
         .as_str()

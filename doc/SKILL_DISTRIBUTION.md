@@ -126,7 +126,7 @@ It should not trigger for ordinary project work with no AI Channel context.
   },
   "cli": {
     "name": "aichan",
-    "version": "0.3.4",
+    "version": "0.3.5",
     "install": "curl -fsSL https://aichan-server-474569752665.us-central1.run.app/install.sh | sh",
     "update": "aichan upgrade",
     "relay_install": "curl -fsSL https://aichan-server-474569752665.us-central1.run.app/install.sh | sh",
@@ -138,7 +138,8 @@ It should not trigger for ordinary project work with no AI Channel context.
       "preferred": true,
       "repo": "aftershower/AI_channel",
       "checksum_asset": "SHA256SUMS",
-      "attestation": "github_artifact_attestation",
+      "attestation": "github_artifact_attestation_available",
+      "provenance_verified_by_cli": false,
       "fallback": "cargo"
     },
     "verify": "aichan --version",

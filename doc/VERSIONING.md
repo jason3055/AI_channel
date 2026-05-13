@@ -26,7 +26,7 @@ The preferred installed-CLI update path is:
 aichan upgrade
 ```
 
-That command prefers the latest GitHub Release for the current platform. It downloads the matching `aichan-<version>-<target>.tar.gz`, verifies it against the release `SHA256SUMS`, and replaces the current executable. Release artifacts are built by `.github/workflows/release.yml` and carry GitHub artifact attestations.
+That command prefers the latest GitHub Release for the current platform. It downloads the matching `aichan-<version>-<target>.tar.gz`, verifies it against the release `SHA256SUMS`, rejects unsafe archive paths, and replaces the current executable. Release artifacts are built by `.github/workflows/release.yml` and carry GitHub artifact attestations; current CLI upgrades do not verify provenance automatically, so manual provenance checks should use `gh attestation verify`.
 
 If no release exists yet, no matching platform archive exists, or the user requests a branch/revision install, `aichan upgrade` falls back to the Cargo install path:
 
@@ -37,9 +37,12 @@ cargo install --git https://github.com/aftershower/AI_channel aichan --locked --
 Create public releases by pushing a version tag that matches the crate versions:
 
 ```bash
-git tag v0.3.4
-git push origin v0.3.4
+git tag v0.3.5
+git push origin v0.3.5
 ```
+
+The release workflow checks that the tag, all Rust crate versions, and the
+corresponding `Cargo.lock` package versions match before publishing assets.
 
 If an older installed CLI does not have `aichan upgrade`, rerun the relay installer or direct Cargo command from the README.
 

@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -561,7 +561,8 @@ fn release_upgrade_plan(current_version: &str) -> serde_json::Value {
         "latest_api_url": latest_release_api_url(),
         "asset_name": current_platform_release_asset_name(current_version),
         "checksum_asset": "SHA256SUMS",
-        "attestation": "GitHub artifact attestation from .github/workflows/release.yml",
+        "attestation": "GitHub artifact attestation available for manual verification",
+        "provenance_verified_by_cli": false,
     })
 }
 
@@ -861,6 +862,7 @@ fn create_upgrade_temp_dir() -> Result<PathBuf> {
 }
 
 fn extract_release_archive(archive_path: &Path, destination: &Path) -> Result<()> {
+    validate_release_archive_entries(archive_path)?;
     let output = ProcessCommand::new("tar")
         .arg("-xzf")
         .arg(archive_path)
@@ -877,6 +879,49 @@ fn extract_release_archive(archive_path: &Path, destination: &Path) -> Result<()
         ));
     }
     Ok(())
+}
+
+fn validate_release_archive_entries(archive_path: &Path) -> Result<()> {
+    let output = ProcessCommand::new("tar")
+        .arg("-tzf")
+        .arg(archive_path)
+        .output()
+        .context("list release archive with tar")?;
+    if !output.status.success() {
+        let stderr_tail = text_tail(&output.stderr, UPGRADE_OUTPUT_TAIL_LINES);
+        return Err(anyhow!(
+            "list release archive failed with status {}: {}",
+            output.status,
+            stderr_tail.trim()
+        ));
+    }
+
+    let listing = String::from_utf8_lossy(&output.stdout);
+    for entry in listing.lines() {
+        if !release_archive_entry_is_safe(entry) {
+            return Err(anyhow!("release archive contains unsafe path {entry:?}"));
+        }
+    }
+    Ok(())
+}
+
+fn release_archive_entry_is_safe(entry: &str) -> bool {
+    if entry.trim().is_empty() {
+        return false;
+    }
+    let path = Path::new(entry);
+    if path.is_absolute() {
+        return false;
+    }
+    let mut has_normal_component = false;
+    for component in path.components() {
+        match component {
+            Component::Normal(_) => has_normal_component = true,
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return false,
+        }
+    }
+    has_normal_component
 }
 
 fn install_release_binary(extracted_binary: &Path) -> Result<PathBuf> {
@@ -1110,6 +1155,16 @@ fn inbox(state: &LocalStateDir, args: InboxArgs, json: bool) -> Result<()> {
     {
         let signed: SignedProtocolObject<MessageEnvelopePayload> =
             serde_json::from_value(record.clone())?;
+        signed
+            .verify_message_envelope()
+            .with_context(|| format!("message envelope verification failed for {}", signed.id))?;
+        if signed.payload.recipient != identity.peer_id {
+            return Err(anyhow!(
+                "message envelope recipient {} does not match local peer {}",
+                signed.payload.recipient,
+                identity.peer_id
+            ));
+        }
         let cache_path = state.inbox_cache_dir().join(format!("{}.json", signed.id));
         if cache_path.exists() {
             continue;
@@ -1456,15 +1511,24 @@ fn backup_create(state: &LocalStateDir, args: BackupCreateArgs, json: bool) -> R
     metadata.last_local_backup_path = Some(output.display().to_string());
     metadata.write_to_state(state)?;
 
-    let mut hosted_upload: Option<(HostedBackupLocator, HostedBackupUploadResponse)> = None;
+    let mut hosted_locator: Option<HostedBackupLocator> = None;
+    let mut hosted_upload: Option<HostedBackupUploadResponse> = None;
+    let mut hosted_upload_error: Option<String> = None;
     if let Some(base_url) = hosted_base_url.as_deref() {
         let locator = derive_hosted_backup_locator(&recovery_phrase)?;
-        let upload = upload_hosted_backup(base_url, &locator, &backup)?;
-        metadata.backup_lookup_id = Some(locator.backup_lookup_id.clone());
-        metadata.last_hosted_backup_at = Some(upload.created_at);
-        metadata.last_hosted_generation_id = Some(upload.generation_id.clone());
-        metadata.write_to_state(state)?;
-        hosted_upload = Some((locator, upload));
+        match upload_hosted_backup(base_url, &locator, &backup) {
+            Ok(upload) => {
+                metadata.backup_lookup_id = Some(locator.backup_lookup_id.clone());
+                metadata.last_hosted_backup_at = Some(upload.created_at);
+                metadata.last_hosted_generation_id = Some(upload.generation_id.clone());
+                metadata.write_to_state(state)?;
+                hosted_upload = Some(upload);
+            }
+            Err(error) => {
+                hosted_upload_error = Some(error.to_string());
+            }
+        }
+        hosted_locator = Some(locator);
     }
 
     if json {
@@ -1476,27 +1540,47 @@ fn backup_create(state: &LocalStateDir, args: BackupCreateArgs, json: bool) -> R
             "created_at": created_at,
             "recovery_phrase": recovery_phrase,
         });
-        if let Some((locator, upload)) = &hosted_upload {
-            value["hosted"] = serde_json::json!({
-                "uploaded": true,
-                "backup_lookup_id": locator.backup_lookup_id.as_str(),
-                "generation_id": upload.generation_id.as_str(),
-                "created_at": upload.created_at.to_rfc3339(),
-                "size_bytes": upload.size_bytes,
-                "content_sha256": upload.content_sha256.as_str(),
-            });
+        if let Some(locator) = &hosted_locator {
+            value["hosted"] = if let Some(upload) = &hosted_upload {
+                serde_json::json!({
+                    "uploaded": true,
+                    "backup_lookup_id": locator.backup_lookup_id.as_str(),
+                    "generation_id": upload.generation_id.as_str(),
+                    "created_at": upload.created_at.to_rfc3339(),
+                    "size_bytes": upload.size_bytes,
+                    "content_sha256": upload.content_sha256.as_str(),
+                })
+            } else {
+                serde_json::json!({
+                    "uploaded": false,
+                    "backup_lookup_id": locator.backup_lookup_id.as_str(),
+                    "upload_error": hosted_upload_error.as_deref().unwrap_or("unknown upload error"),
+                })
+            };
         }
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         println!("backup_file: {}", output.display());
         println!("peer_id: {}", payload.peer_id);
-        if let Some((locator, upload)) = &hosted_upload {
-            println!("hosted_uploaded: true");
+        if let Some(locator) = &hosted_locator {
             println!("backup_lookup_id: {}", locator.backup_lookup_id);
-            println!("hosted_generation_id: {}", upload.generation_id);
+            if let Some(upload) = &hosted_upload {
+                println!("hosted_uploaded: true");
+                println!("hosted_generation_id: {}", upload.generation_id);
+            } else {
+                println!("hosted_uploaded: false");
+                if let Some(error) = &hosted_upload_error {
+                    println!("hosted_upload_error: {error}");
+                }
+            }
         }
         println!("recovery_phrase: {recovery_phrase}");
         println!("Store the recovery phrase somewhere safe. It is not saved locally.");
+    }
+    if let Some(error) = hosted_upload_error {
+        return Err(anyhow!(
+            "hosted backup upload failed after writing local backup: {error}"
+        ));
     }
     Ok(())
 }
@@ -1865,32 +1949,25 @@ fn extract_recipient_message_key(
         .into_iter()
         .flatten()
     {
-        if record
-            .pointer("/payload/peer_id")
-            .and_then(serde_json::Value::as_str)
-            != Some(recipient.as_str())
-        {
+        let Ok(signed) =
+            serde_json::from_value::<SignedProtocolObject<PublishRecordPayload>>(record.clone())
+        else {
+            continue;
+        };
+        let Ok(peer_id) = signed.verify_publish_record() else {
+            continue;
+        };
+        if peer_id.as_str() != recipient.as_str() {
             continue;
         }
-        if let Some(key) = record
-            .pointer("/payload/capabilities/message_encryption")
-            .and_then(serde_json::Value::as_array)
-            .and_then(|keys| {
-                keys.iter().find(|key| {
-                    key.get("suite").and_then(serde_json::Value::as_str)
-                        == Some(MESSAGE_ENCRYPTION_SUITE)
-                })
-            })
+        if let Some(key) = signed
+            .payload
+            .capabilities
+            .message_encryption
+            .iter()
+            .find(|key| key.suite == MESSAGE_ENCRYPTION_SUITE)
         {
-            let key_id = key
-                .get("key_id")
-                .and_then(serde_json::Value::as_str)
-                .context("recipient message key missing key_id")?;
-            let public_key = key
-                .get("public_key")
-                .and_then(serde_json::Value::as_str)
-                .context("recipient message key missing public_key")?;
-            return Ok((key_id.to_string(), public_key.to_string()));
+            return Ok((key.key_id.clone(), key.public_key.clone()));
         }
     }
 
@@ -2195,27 +2272,61 @@ mod tests {
     #[test]
     fn release_asset_name_matches_supported_platforms() {
         assert_eq!(
-            release_asset_name_for("0.3.4", "macos", "aarch64"),
-            Some("aichan-0.3.4-aarch64-apple-darwin.tar.gz".to_string())
+            release_asset_name_for("0.3.5", "macos", "aarch64"),
+            Some("aichan-0.3.5-aarch64-apple-darwin.tar.gz".to_string())
         );
         assert_eq!(
-            release_asset_name_for("0.3.4", "linux", "x86_64"),
-            Some("aichan-0.3.4-x86_64-unknown-linux-gnu.tar.gz".to_string())
+            release_asset_name_for("0.3.5", "linux", "x86_64"),
+            Some("aichan-0.3.5-x86_64-unknown-linux-gnu.tar.gz".to_string())
         );
-        assert_eq!(release_asset_name_for("0.3.4", "windows", "x86_64"), None);
+        assert_eq!(release_asset_name_for("0.3.5", "windows", "x86_64"), None);
     }
 
     #[test]
     fn sha256sums_parser_selects_exact_asset_name() {
         let sums = "\
-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  aichan-0.3.4-x86_64-unknown-linux-gnu.tar.gz
-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  aichan-0.3.4-aarch64-apple-darwin.tar.gz
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  aichan-0.3.5-x86_64-unknown-linux-gnu.tar.gz
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  aichan-0.3.5-aarch64-apple-darwin.tar.gz
 ";
 
         assert_eq!(
-            checksum_from_sha256sums(sums, "aichan-0.3.4-aarch64-apple-darwin.tar.gz"),
+            checksum_from_sha256sums(sums, "aichan-0.3.5-aarch64-apple-darwin.tar.gz"),
             Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string())
         );
         assert_eq!(checksum_from_sha256sums(sums, "missing.tar.gz"), None);
+    }
+
+    #[test]
+    fn recipient_key_discovery_ignores_unverified_publish_records() {
+        let attacker_dir = tempfile::tempdir().unwrap();
+        let recipient_dir = tempfile::tempdir().unwrap();
+        let attacker_state = LocalStateDir::new(attacker_dir.path());
+        let recipient_state = LocalStateDir::new(recipient_dir.path());
+        let recipient_record =
+            build_publish_record(&recipient_state, "real recipient".to_string(), vec![]).unwrap();
+        let recipient_peer = recipient_record.payload.peer_id.clone();
+        let expected_key = recipient_record.payload.capabilities.message_encryption[0]
+            .public_key
+            .clone();
+        let mut forged_record =
+            build_publish_record(&attacker_state, "forged recipient".to_string(), vec![]).unwrap();
+        forged_record.payload.peer_id = recipient_peer.clone();
+
+        let value = serde_json::json!({
+            "records": [forged_record, recipient_record]
+        });
+
+        let (_, discovered_key) = extract_recipient_message_key(&value, &recipient_peer).unwrap();
+        assert_eq!(discovered_key, expected_key);
+    }
+
+    #[test]
+    fn release_archive_entry_safety_rejects_escape_paths() {
+        assert!(release_archive_entry_is_safe("aichan"));
+        assert!(release_archive_entry_is_safe("./aichan"));
+        assert!(!release_archive_entry_is_safe("../aichan"));
+        assert!(!release_archive_entry_is_safe("bin/../../aichan"));
+        assert!(!release_archive_entry_is_safe("/tmp/aichan"));
+        assert!(!release_archive_entry_is_safe(""));
     }
 }

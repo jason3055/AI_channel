@@ -22,6 +22,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Check release version
+        run: bash .github/scripts/check-release-version.sh "${GITHUB_REF_NAME}"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
