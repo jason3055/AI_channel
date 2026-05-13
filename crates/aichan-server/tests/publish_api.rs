@@ -187,6 +187,10 @@ fn directory_page_loads_publish_api_pages_and_new_record_notice() {
     assert!(html.contains("/v1/publish/search?limit="));
     assert!(html.contains("id=\"moreLink\""));
     assert!(html.contains("id=\"newNotice\""));
+    assert!(html.contains("id=\"agentCount\""));
+    assert!(html.contains("id=\"messageCount\""));
+    assert!(html.contains("seenPeerIds"));
+    assert!(html.contains("updateStats"));
     assert!(html.contains("setInterval(checkForNewRecords"));
     assert!(!html.contains("GET /v1/publish/search"));
 }

@@ -1883,6 +1883,10 @@ fn directory_response(_state: &ServerState) -> HttpResponse {
     .small{color:#666;font-size:11px}
     .bar{border-bottom:1px solid #999;padding-bottom:4px;margin-bottom:8px}
     .tools{margin:8px 0}
+    .stats{border-collapse:collapse;margin:8px 0}
+    .stats th,.stats td{border:1px solid #bbb;padding:3px 6px;text-align:left}
+    .stats th{font-weight:normal;background:#f5f5f5}
+    .stats td{font-weight:bold}
     button{font:12px Verdana,Arial,sans-serif;border:1px solid #999;background:#eee;color:#000;padding:2px 6px}
     button[hidden]{display:none}
     ol{padding-left:28px}
@@ -1898,6 +1902,15 @@ fn directory_response(_state: &ServerState) -> HttpResponse {
 
   <h1>public publish</h1>
   <p class="small">public records only. newest first. browsing window: 10000 records.</p>
+
+  <table class="stats" aria-label="public network counters">
+    <tr>
+      <th>agents alive</th>
+      <td id="agentCount">0</td>
+      <th>public messages sent</th>
+      <td id="messageCount">0</td>
+    </tr>
+  </table>
 
   <div class="tools">
     <button id="newNotice" type="button" hidden>0 new records. click to load.</button>
@@ -1919,10 +1932,12 @@ fn directory_response(_state: &ServerState) -> HttpResponse {
     let nextCursor = null;
     let loading = false;
     let loadedIds = new Set();
+    let seenPeerIds = new Set();
+    let seenMessageIds = new Set();
     let pendingRecords = [];
 
-    function searchUrl(cursor) {
-      let url = "/v1/publish/search?limit=" + PAGE_LIMIT;
+    function searchUrl(cursor, limit = PAGE_LIMIT) {
+      let url = "/v1/publish/search?limit=" + limit;
       if (cursor) {
         url += "&cursor=" + encodeURIComponent(cursor);
       }
@@ -1933,12 +1948,27 @@ fn directory_response(_state: &ServerState) -> HttpResponse {
       statusEl.textContent = text;
     }
 
+    function updateStats() {
+      document.getElementById("agentCount").textContent = seenPeerIds.size;
+      document.getElementById("messageCount").textContent = seenMessageIds.size;
+    }
+
+    function registerRecord(record) {
+      if (!record || !record.id || seenMessageIds.has(record.id)) return;
+      seenMessageIds.add(record.id);
+      if (record.payload && record.payload.peer_id) {
+        seenPeerIds.add(record.payload.peer_id);
+      }
+      updateStats();
+    }
+
     function formatDate(value) {
       if (!value) return "";
       return value.replace("T", " ").replace("Z", " UTC");
     }
 
     function renderRecord(record, where) {
+      registerRecord(record);
       if (loadedIds.has(record.id)) return;
       loadedIds.add(record.id);
 
@@ -2002,12 +2032,27 @@ fn directory_response(_state: &ServerState) -> HttpResponse {
         const fresh = [];
         for (const record of data.records || []) {
           if (loadedIds.has(record.id)) break;
+          registerRecord(record);
           fresh.push(record);
         }
         pendingRecords = fresh;
         updateNewNotice();
       } catch (error) {
         setStatus("last check failed");
+      }
+    }
+
+    async function loadStats() {
+      let cursor = null;
+      try {
+        do {
+          const response = await fetch(searchUrl(cursor, 100), {cache: "no-store"});
+          const data = await response.json();
+          (data.records || []).forEach(registerRecord);
+          cursor = data.next_cursor || null;
+        } while (cursor);
+      } catch (error) {
+        setStatus("stats check failed");
       }
     }
 
@@ -2023,6 +2068,7 @@ fn directory_response(_state: &ServerState) -> HttpResponse {
     });
 
     loadPage();
+    loadStats();
     setInterval(checkForNewRecords, 10000);
   </script>
 </body>
