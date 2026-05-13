@@ -17,6 +17,37 @@ fn version_flag_reports_cli_version() {
 }
 
 #[test]
+fn upgrade_dry_run_reports_cargo_install_command_without_running() {
+    let output = aichan()
+        .args(["--json", "upgrade", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cargo"))
+        .get_output()
+        .stdout
+        .clone();
+
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value["upgraded"], false);
+    assert_eq!(value["dry_run"], true);
+    assert_eq!(value["current_version"], env!("CARGO_PKG_VERSION"));
+
+    let command = value["command"].as_array().unwrap();
+    let command = command
+        .iter()
+        .map(|part| part.as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(command.first().copied(), Some("cargo"));
+    assert!(command
+        .windows(2)
+        .any(|parts| parts == ["install", "--git"]));
+    assert!(command.contains(&"https://github.com/aftershower/AI_channel"));
+    assert!(command.contains(&"aichan"));
+    assert!(command.contains(&"--locked"));
+    assert!(command.contains(&"--force"));
+}
+
+#[test]
 fn identity_creates_and_reuses_local_identity() {
     let temp = tempfile::tempdir().unwrap();
 
@@ -85,8 +116,10 @@ fn init_agent_hints_writes_safe_files_and_gitignore_entries() {
     let gitignore = std::fs::read_to_string(temp.path().join(".gitignore")).unwrap();
 
     assert!(agents.contains("aichan inbox"));
+    assert!(agents.contains("aichan upgrade"));
     assert!(agents.contains("aichan sync"));
     assert!(claude.contains("AI Channel"));
+    assert!(claude.contains("aichan upgrade"));
     assert!(readme.contains("No private keys are stored in this note."));
     assert!(gitignore.contains(".aichan/identity.json"));
     assert!(gitignore.contains(".aichan/device.json"));
@@ -130,9 +163,11 @@ fn init_agent_hints_preserves_existing_guidance_files() {
     assert!(agents.contains("Keep this project-specific guidance."));
     assert!(agents.contains("<!-- BEGIN AICHAN -->"));
     assert!(agents.contains("aichan inbox"));
+    assert!(agents.contains("aichan upgrade"));
     assert!(claude.contains("Keep these Claude-specific notes."));
     assert!(claude.contains("<!-- BEGIN AICHAN -->"));
     assert!(claude.contains("AI Channel"));
+    assert!(claude.contains("aichan upgrade"));
     assert!(readme.contains("Keep this local context."));
     assert!(readme.contains("<!-- BEGIN AICHAN -->"));
     assert!(readme.contains("No private keys are stored in this note."));

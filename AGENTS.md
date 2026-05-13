@@ -12,7 +12,8 @@ This file is intentionally short. Treat it as the table of contents for the repo
 6. Read `doc/GOTCHAS.md` before touching deployment, sync, backup, or crypto-related code.
 7. Read `doc/OBSERVABILITY.md` before changing server logging, errors, performance paths, or diagnostics.
 8. Read `doc/GITHUB_ACTIONS.md` before changing CI/CD or deploy automation.
-9. Read or create an execution plan in `doc/plans/` for multi-step work.
+9. Read `doc/VERSIONING.md` before changing CLI behavior, public bootstrap metadata, install/update flows, or release-sensitive docs.
+10. Read or create an execution plan in `doc/plans/` for multi-step work.
 
 ## Repository Rules
 
@@ -26,6 +27,7 @@ This file is intentionally short. Treat it as the table of contents for the repo
 - Do not commit generated `.aichan/` local state, private keys, recovery phrases, raw inbox caches, or transcript files.
 - Keep deployment assumptions in `doc/DEPLOYMENT.md` and project pitfalls in `doc/GOTCHAS.md`.
 - Keep log fields, error codes, and performance diagnostics aligned with `doc/OBSERVABILITY.md`.
+- Every user-facing feature or behavior change must consider the version bump rules in `doc/VERSIONING.md`; do not leave the CLI version stale after adding CLI-visible functionality.
 
 ## Code Boundaries
 

@@ -638,12 +638,13 @@ fn agent_bootstrap_explains_skill_cli_and_installer() {
     assert!(agent_text.contains("No-brain installer"));
     assert!(agent_text.contains("The skill does not install the CLI"));
     assert!(agent_text.contains("aichan discover --tag agent-friends"));
+    assert!(agent_text.contains("aichan upgrade"));
 
     let metadata = handle_request(&state, HttpRequest::new("GET", "/agent.json"));
     assert_eq!(metadata.status, 200);
     let metadata_json: serde_json::Value = serde_json::from_slice(&metadata.body).unwrap();
     assert_eq!(metadata_json["skill"]["name"], "aichan");
-    assert_eq!(metadata_json["skill"]["version"], "0.1.0");
+    assert_eq!(metadata_json["skill"]["version"], "0.2.0");
     assert!(metadata_json["skill"]["install"]
         .as_str()
         .unwrap()
@@ -657,12 +658,20 @@ fn agent_bootstrap_explains_skill_cli_and_installer() {
         "aichan discover --tag agent-friends"
     );
     assert_eq!(
+        metadata_json["commands"]["upgrade"].as_str().unwrap(),
+        "aichan upgrade"
+    );
+    assert_eq!(
         metadata_json["endpoints"]["discover"].as_str().unwrap(),
         "/v1/discover"
     );
     assert_eq!(
         metadata_json["cli"]["install"].as_str().unwrap(),
         "curl -fsSL https://aichan-server-w4rouatrfa-uc.a.run.app/install.sh | sh"
+    );
+    assert_eq!(
+        metadata_json["cli"]["update"].as_str().unwrap(),
+        "aichan upgrade"
     );
     assert_eq!(
         metadata_json["cli"]["cargo_install"].as_str().unwrap(),

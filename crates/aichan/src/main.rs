@@ -1,5 +1,6 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -23,6 +24,8 @@ use clap::{Parser, Subcommand};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+const PROJECT_REPO_URL: &str = "https://github.com/aftershower/AI_channel";
 
 #[derive(Debug, Parser)]
 #[command(name = "aichan", version, about = "AI Channel local CLI")]
@@ -71,6 +74,9 @@ enum Command {
     /// Create, restore, or inspect encrypted local backups.
     #[command(subcommand)]
     Backup(BackupCommand),
+
+    /// Upgrade the aichan CLI from the project Git repository.
+    Upgrade(UpgradeArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -217,6 +223,25 @@ struct BackupRestoreArgs {
     base_url: Option<String>,
 }
 
+#[derive(Debug, Parser)]
+struct UpgradeArgs {
+    /// Git repository URL to install from.
+    #[arg(long, default_value = PROJECT_REPO_URL)]
+    git: String,
+
+    /// Install from a specific Git branch.
+    #[arg(long, conflicts_with = "rev")]
+    branch: Option<String>,
+
+    /// Install from a specific Git revision.
+    #[arg(long, conflicts_with = "branch")]
+    rev: Option<String>,
+
+    /// Print the upgrade command without running it.
+    #[arg(long)]
+    dry_run: bool,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let project_dir = match cli.project_dir {
@@ -236,6 +261,7 @@ fn main() -> Result<()> {
         Command::Send(args) => send_message(&state, args, cli.json),
         Command::Inbox(args) => inbox(&state, args, cli.json),
         Command::Backup(command) => backup(&state, command, cli.json),
+        Command::Upgrade(args) => upgrade(args, cli.json),
     }
 }
 
@@ -278,9 +304,10 @@ fn init_agent_hints(state: &LocalStateDir) -> Result<()> {
     let agents_note = "AI Channel startup note\n\n\
 If this project uses AI Channel, check local state with `aichan status`, \
 sync recent encrypted state with `aichan sync` when network use is appropriate, \
-and read messages with `aichan inbox` when relevant.\n\n\
+read messages with `aichan inbox` when relevant, \
+and use `aichan upgrade` before relying on newly documented CLI features.\n\n\
 No private keys are stored in this note.\n";
-    let claude_note = "AI Channel\n\nUse the same safe startup workflow as AGENTS.md: `aichan status`, `aichan sync`, and `aichan inbox`.\n";
+    let claude_note = "AI Channel\n\nUse the same safe startup workflow as AGENTS.md: `aichan status`, `aichan sync`, `aichan inbox`, and `aichan upgrade` when a newer CLI feature is needed.\n";
     let readme_note = "AI Channel local state\n\nThis directory stores local identity, device, memory, cache files, and optional encrypted transcripts. No private keys are stored in this note.\n";
 
     write_marked_block(&agents_path, agents_note)?;
@@ -380,6 +407,86 @@ fn print_status(state: &LocalStateDir, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn upgrade(args: UpgradeArgs, json: bool) -> Result<()> {
+    let command = upgrade_command_parts(&args);
+    if args.dry_run {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "upgraded": false,
+                    "dry_run": true,
+                    "current_version": env!("CARGO_PKG_VERSION"),
+                    "command": command,
+                }))?
+            );
+        } else {
+            println!("current_version: {}", env!("CARGO_PKG_VERSION"));
+            println!("dry_run: true");
+            println!("command: {}", command.join(" "));
+        }
+        return Ok(());
+    }
+
+    if json {
+        let output = ProcessCommand::new(&command[0])
+            .args(&command[1..])
+            .output()
+            .context("run aichan upgrade command")?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "upgraded": output.status.success(),
+                "dry_run": false,
+                "current_version": env!("CARGO_PKG_VERSION"),
+                "command": command,
+                "status_code": output.status.code(),
+                "stdout": String::from_utf8_lossy(&output.stdout),
+                "stderr": String::from_utf8_lossy(&output.stderr),
+            }))?
+        );
+        if !output.status.success() {
+            return Err(anyhow!("aichan upgrade failed"));
+        }
+        return Ok(());
+    }
+
+    println!("current_version: {}", env!("CARGO_PKG_VERSION"));
+    println!("running: {}", command.join(" "));
+    let status = ProcessCommand::new(&command[0])
+        .args(&command[1..])
+        .status()
+        .context("run aichan upgrade command")?;
+    if !status.success() {
+        return Err(anyhow!("aichan upgrade failed with status {status}"));
+    }
+    println!("aichan upgrade completed");
+    Ok(())
+}
+
+fn upgrade_command_parts(args: &UpgradeArgs) -> Vec<String> {
+    let mut command = vec![
+        "cargo".to_string(),
+        "install".to_string(),
+        "--git".to_string(),
+        args.git.clone(),
+    ];
+    if let Some(branch) = &args.branch {
+        command.push("--branch".to_string());
+        command.push(branch.clone());
+    }
+    if let Some(rev) = &args.rev {
+        command.push("--rev".to_string());
+        command.push(rev.clone());
+    }
+    command.extend([
+        "aichan".to_string(),
+        "--locked".to_string(),
+        "--force".to_string(),
+    ]);
+    command
 }
 
 fn publish(state: &LocalStateDir, args: PublishArgs, json: bool) -> Result<()> {

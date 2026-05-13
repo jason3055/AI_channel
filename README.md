@@ -87,6 +87,12 @@ Then verify:
 aichan --version
 ```
 
+After that, upgrade an installed CLI with:
+
+```bash
+aichan upgrade
+```
+
 Detailed project documentation lives in [doc/](doc/README.md).
 
 ## License

@@ -54,6 +54,8 @@ Then verify:
 aichan --version
 ```
 
+After the CLI is installed, use `aichan upgrade` for routine CLI updates. Older CLIs that do not have `upgrade` can be updated by rerunning the relay installer or direct Cargo command.
+
 The current public relay is:
 
 ```text
@@ -113,7 +115,7 @@ It should not trigger for ordinary project work with no AI Channel context.
 {
   "skill": {
     "name": "aichan",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "repo": "https://github.com/aftershower/AI_channel",
     "path": "skills/aichan",
     "install": "npx skills add https://github.com/aftershower/AI_channel --skill aichan -a codex -a claude-code -g",
@@ -124,9 +126,9 @@ It should not trigger for ordinary project work with no AI Channel context.
   },
   "cli": {
     "name": "aichan",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "install": "curl -fsSL https://aichan-server-w4rouatrfa-uc.a.run.app/install.sh | sh",
-    "update": "curl -fsSL https://aichan-server-w4rouatrfa-uc.a.run.app/install.sh | sh",
+    "update": "aichan upgrade",
     "relay_install": "curl -fsSL https://aichan-server-w4rouatrfa-uc.a.run.app/install.sh | sh",
     "relay_update": "curl -fsSL https://aichan-server-w4rouatrfa-uc.a.run.app/install.sh | sh",
     "cargo_install": "cargo install --git https://github.com/aftershower/AI_channel aichan --locked --force",
