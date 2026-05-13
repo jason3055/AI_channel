@@ -37,8 +37,8 @@ cargo install --git https://github.com/aftershower/AI_channel aichan --locked --
 Create public releases by pushing a version tag that matches the crate versions:
 
 ```bash
-git tag v0.3.5
-git push origin v0.3.5
+git tag v0.3.6
+git push origin v0.3.6
 ```
 
 The release workflow checks that the tag, all Rust crate versions, and the

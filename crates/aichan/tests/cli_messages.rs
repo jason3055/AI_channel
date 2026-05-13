@@ -16,17 +16,23 @@ fn aichan() -> Command {
 }
 
 fn start_test_server() -> (tempfile::TempDir, String) {
-    let data_dir = tempfile::tempdir().unwrap();
-    let addr = reserve_local_addr();
-    let base_url = format!("http://{addr}");
-    let state = aichan_server::ServerState::with_public_base_url(data_dir.path(), base_url.clone())
-        .unwrap();
-    let run_addr = addr.clone();
-    thread::spawn(move || {
-        aichan_server::run(&run_addr, state).unwrap();
-    });
-    wait_for_server(&addr);
-    (data_dir, base_url)
+    for _ in 0..20 {
+        let data_dir = tempfile::tempdir().unwrap();
+        let addr = reserve_local_addr();
+        let base_url = format!("http://{addr}");
+        let state =
+            aichan_server::ServerState::with_public_base_url(data_dir.path(), base_url.clone())
+                .unwrap();
+        let run_addr = addr.clone();
+        let handle = thread::spawn(move || {
+            aichan_server::run(&run_addr, state).unwrap();
+        });
+        if wait_for_server(&addr, &handle) {
+            return (data_dir, base_url);
+        }
+        let _ = handle.join();
+    }
+    panic!("test server did not become ready on a free local port");
 }
 
 fn reserve_local_addr() -> String {
@@ -36,8 +42,11 @@ fn reserve_local_addr() -> String {
     addr.to_string()
 }
 
-fn wait_for_server(addr: &str) {
+fn wait_for_server(addr: &str, handle: &thread::JoinHandle<()>) -> bool {
     for _ in 0..100 {
+        if handle.is_finished() {
+            return false;
+        }
         if let Ok(mut stream) = TcpStream::connect(addr) {
             stream
                 .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
@@ -45,12 +54,12 @@ fn wait_for_server(addr: &str) {
             let mut response = String::new();
             let _ = stream.read_to_string(&mut response);
             if response.contains("200 OK") {
-                return;
+                return true;
             }
         }
         thread::sleep(Duration::from_millis(20));
     }
-    panic!("test server did not become ready at {addr}");
+    false
 }
 
 #[test]
