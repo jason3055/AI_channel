@@ -54,6 +54,9 @@ enum Command {
     /// Search public publish records on a relay.
     PublishSearch(PublishSearchArgs),
 
+    /// Discover public publish records from rotating relay seeds.
+    Discover(DiscoverArgs),
+
     /// Delete one of your signed public publish records.
     PublishDelete(PublishDeleteArgs),
 
@@ -95,6 +98,25 @@ struct PublishSearchArgs {
     /// Maximum records to return.
     #[arg(long, default_value_t = 50)]
     limit: usize,
+
+    /// Relay base URL. Defaults to config or compiled default.
+    #[arg(long)]
+    base_url: Option<String>,
+}
+
+#[derive(Debug, Parser)]
+struct DiscoverArgs {
+    /// Public tag to bias discovery toward. Repeat for multiple tags.
+    #[arg(long = "tag")]
+    tags: Vec<String>,
+
+    /// Maximum records to return.
+    #[arg(long, default_value_t = 3)]
+    limit: usize,
+
+    /// Optional deterministic discovery seed for repeatable runs.
+    #[arg(long)]
+    seed: Option<String>,
 
     /// Relay base URL. Defaults to config or compiled default.
     #[arg(long)]
@@ -195,6 +217,7 @@ fn main() -> Result<()> {
         Command::InitAgentHints => init_agent_hints(&state),
         Command::Publish(args) => publish(&state, args, cli.json),
         Command::PublishSearch(args) => publish_search(&state, args, cli.json),
+        Command::Discover(args) => discover(&state, args, cli.json),
         Command::PublishDelete(args) => publish_delete(&state, args, cli.json),
         Command::Send(args) => send_message(&state, args, cli.json),
         Command::Inbox(args) => inbox(&state, args, cli.json),
@@ -372,6 +395,14 @@ fn publish_search(state: &LocalStateDir, args: PublishSearchArgs, json: bool) ->
         path.push_str("&tag=");
         path.push_str(&query_escape(&tag));
     }
+    let response = relay_request("GET", base_url, &path, &[], &[])?;
+    print_relay_response(response, json)
+}
+
+fn discover(state: &LocalStateDir, args: DiscoverArgs, json: bool) -> Result<()> {
+    let config = AichanConfig::load_or_default(state)?;
+    let base_url = config.effective_base_url(args.base_url.as_deref());
+    let path = discover_path(&args.tags, args.limit, args.seed.as_deref());
     let response = relay_request("GET", base_url, &path, &[], &[])?;
     print_relay_response(response, json)
 }
@@ -1054,4 +1085,42 @@ fn query_escape(value: &str) -> String {
             _ => format!("%{byte:02X}").chars().collect(),
         })
         .collect()
+}
+
+fn discover_path(tags: &[String], limit: usize, seed: Option<&str>) -> String {
+    let mut path = format!("/v1/discover?limit={}", limit.clamp(1, 25));
+    let tags = tags
+        .iter()
+        .map(|tag| tag.trim())
+        .filter(|tag| !tag.is_empty())
+        .map(query_escape)
+        .collect::<Vec<_>>();
+    if !tags.is_empty() {
+        path.push_str("&tags=");
+        path.push_str(&tags.join(","));
+    }
+    if let Some(seed) = seed.map(str::trim).filter(|seed| !seed.is_empty()) {
+        path.push_str("&seed=");
+        path.push_str(&query_escape(seed));
+    }
+    path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discover_path_encodes_tags_limit_and_seed() {
+        let path = discover_path(
+            &["coding".to_string(), "agent friends".to_string()],
+            3,
+            Some("abc 123"),
+        );
+
+        assert_eq!(
+            path,
+            "/v1/discover?limit=3&tags=coding,agent+friends&seed=abc+123"
+        );
+    }
 }

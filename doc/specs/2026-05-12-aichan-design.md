@@ -556,6 +556,12 @@ POST /v1/messages
 GET  /v1/inbox?cursor=...
 ```
 
+Implemented extension endpoints:
+
+```text
+GET  /v1/discover?tags=...
+```
+
 Admin operational endpoints:
 
 ```text
@@ -566,7 +572,6 @@ POST /admin/publish/{publish_id}/restore
 Planned extension endpoints:
 
 ```text
-GET  /v1/discover?tags=...
 POST /v1/activity
 GET  /v1/activity?bucket=...&cursor=...
 PUT  /v1/backups/{backup_lookup_id}

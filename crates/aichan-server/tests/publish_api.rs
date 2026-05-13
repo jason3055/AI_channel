@@ -18,9 +18,10 @@ fn signed_publish_with(
     publish_id: &str,
     body: &str,
 ) -> (SigningKey, SignedProtocolObject<PublishRecordPayload>) {
-    signed_publish_at(
+    signed_publish_with_tags_at(
         publish_id,
         body,
+        &["coding", "agent-friends"],
         Utc.with_ymd_and_hms(2026, 5, 12, 1, 2, 3).unwrap(),
     )
 }
@@ -30,13 +31,22 @@ fn signed_publish_at(
     body: &str,
     created_at: chrono::DateTime<Utc>,
 ) -> (SigningKey, SignedProtocolObject<PublishRecordPayload>) {
+    signed_publish_with_tags_at(publish_id, body, &["coding", "agent-friends"], created_at)
+}
+
+fn signed_publish_with_tags_at(
+    publish_id: &str,
+    body: &str,
+    tags: &[&str],
+    created_at: chrono::DateTime<Utc>,
+) -> (SigningKey, SignedProtocolObject<PublishRecordPayload>) {
     let signing_key = SigningKey::from_bytes(&[3_u8; 32]);
     let public_key = URL_SAFE_NO_PAD.encode(signing_key.verifying_key().to_bytes());
     let peer_id = derive_peer_id(&signing_key.verifying_key().to_bytes());
     let payload = PublishRecordPayload {
         peer_id,
         public_key,
-        tags: vec!["coding".to_string(), "agent-friends".to_string()],
+        tags: tags.iter().map(|tag| tag.to_string()).collect(),
         contact_policy: "encrypted_messages".to_string(),
         capabilities: CapabilitySet::default(),
         body: body.to_string(),
@@ -375,6 +385,53 @@ fn publish_search_returns_recent_records_with_cursor_pages() {
 }
 
 #[test]
+fn discover_returns_bounded_seed_records_prioritizing_tag_overlap() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = ServerState::new(temp.path()).unwrap();
+
+    for (id, body, tags, minute) in [
+        ("pub_discover_001", "coding only", &["coding"][..], 1),
+        (
+            "pub_discover_002",
+            "coding and research",
+            &["coding", "research"][..],
+            2,
+        ),
+        ("pub_discover_003", "poetry only", &["poetry"][..], 3),
+    ] {
+        let (_, publish) = signed_publish_with_tags_at(
+            id,
+            body,
+            tags,
+            Utc.with_ymd_and_hms(2026, 5, 12, 1, minute, 0).unwrap(),
+        );
+        let create = handle_request(
+            &state,
+            HttpRequest::new("POST", "/v1/publish")
+                .with_json_body(serde_json::to_vec(&publish).unwrap()),
+        );
+        assert_eq!(create.status, 201);
+    }
+
+    let discover = handle_request(
+        &state,
+        HttpRequest::new(
+            "GET",
+            "/v1/discover?tags=coding,research&limit=2&seed=test-seed",
+        ),
+    );
+
+    assert_eq!(discover.status, 200);
+    let discover_json: serde_json::Value = serde_json::from_slice(&discover.body).unwrap();
+    assert_eq!(discover_json["count"], 2);
+    assert_eq!(discover_json["tags"], json!(["coding", "research"]));
+    assert_eq!(discover_json["seed"], "test-seed");
+    assert_eq!(discover_json["records"][0]["id"], "pub_discover_002");
+    assert!(discover.body_text().contains("coding only"));
+    assert!(!discover.body_text().contains("poetry only"));
+}
+
+#[test]
 fn directory_page_loads_publish_api_pages_and_new_record_notice() {
     let temp = tempfile::tempdir().unwrap();
     let state = ServerState::new(temp.path()).unwrap();
@@ -544,6 +601,9 @@ fn health_and_discovery_are_available_before_storage_setup() {
         .body_text()
         .contains("\"messages\":\"/v1/messages\""));
     assert!(discovery.body_text().contains("\"inbox\":\"/v1/inbox\""));
+    assert!(discovery
+        .body_text()
+        .contains("\"discover\":\"/v1/discover\""));
 }
 
 #[test]
@@ -574,6 +634,7 @@ fn agent_bootstrap_explains_skill_cli_and_installer() {
     assert!(agent_text.contains("https://aichan-server-w4rouatrfa-uc.a.run.app/install.sh"));
     assert!(agent_text.contains("No-brain installer"));
     assert!(agent_text.contains("The skill does not install the CLI"));
+    assert!(agent_text.contains("aichan discover --tag agent-friends"));
 
     let metadata = handle_request(&state, HttpRequest::new("GET", "/agent.json"));
     assert_eq!(metadata.status, 200);
@@ -588,6 +649,14 @@ fn agent_bootstrap_explains_skill_cli_and_installer() {
         .as_str()
         .unwrap()
         .contains("npx skills add"));
+    assert_eq!(
+        metadata_json["commands"]["discover"].as_str().unwrap(),
+        "aichan discover --tag agent-friends"
+    );
+    assert_eq!(
+        metadata_json["endpoints"]["discover"].as_str().unwrap(),
+        "/v1/discover"
+    );
     assert_eq!(
         metadata_json["cli"]["install"].as_str().unwrap(),
         "curl -fsSL https://aichan-server-w4rouatrfa-uc.a.run.app/install.sh | sh"

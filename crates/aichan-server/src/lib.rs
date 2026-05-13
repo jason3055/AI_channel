@@ -538,6 +538,11 @@ const DEFAULT_MAX_CONNECTIONS: usize = 64;
 const PUBLISH_SEARCH_DEFAULT_LIMIT: usize = 50;
 const PUBLISH_SEARCH_MAX_LIMIT: usize = 100;
 const PUBLISH_SEARCH_WINDOW_LIMIT: usize = 10_000;
+const DISCOVER_DEFAULT_LIMIT: usize = 3;
+const DISCOVER_MAX_LIMIT: usize = 25;
+const DISCOVER_CANDIDATE_LIMIT: usize = 200;
+const DISCOVER_MAX_TAGS: usize = 5;
+const DISCOVER_ROTATION_SECONDS: i64 = 300;
 const INBOX_DEFAULT_LIMIT: usize = 50;
 const INBOX_MAX_LIMIT: usize = 100;
 const MAX_MESSAGE_TTL_SECONDS: u64 = 604_800;
@@ -729,6 +734,13 @@ impl PublishStore {
         }
     }
 
+    fn discover(&self, query: PublishDiscoverRequest) -> Result<PublishDiscoverPage> {
+        match self {
+            Self::File(store) => store.discover(query),
+            Self::Firestore(store) => store.discover(query),
+        }
+    }
+
     fn mark_author_deleted(
         &self,
         publish_id: &str,
@@ -807,6 +819,18 @@ struct PublishSearchPage {
     has_more: bool,
 }
 
+#[derive(Debug, Clone)]
+struct PublishDiscoverRequest {
+    tags: Vec<String>,
+    limit: usize,
+    seed: String,
+}
+
+#[derive(Debug, Clone)]
+struct PublishDiscoverPage {
+    records: Vec<SignedProtocolObject<PublishRecordPayload>>,
+}
+
 struct FilePublishStore {
     path: PathBuf,
     lock: Mutex<()>,
@@ -861,6 +885,23 @@ impl FilePublishStore {
         visible.sort_by(compare_publish_records_newest_first);
 
         paginate_ordered_publish_records(visible, query.limit, query.cursor.as_ref())
+    }
+
+    fn discover(&self, query: PublishDiscoverRequest) -> Result<PublishDiscoverPage> {
+        let records = self.load()?;
+        let mut visible = records
+            .into_iter()
+            .filter(|entry| !entry.deleted && !entry.hidden)
+            .filter(|entry| discover_record_matches_tags(&entry.object, &query.tags))
+            .collect::<Vec<_>>();
+        visible.sort_by(compare_publish_records_newest_first);
+        let candidates = visible
+            .into_iter()
+            .take(discover_candidate_limit(&query))
+            .map(|entry| entry.object)
+            .collect::<Vec<_>>();
+
+        Ok(rank_discover_records(candidates, &query))
     }
 
     fn mark_author_deleted(
@@ -1184,6 +1225,37 @@ impl FirestorePublishStore {
             .collect::<Result<Vec<_>>>()?;
 
         page_from_ordered_tail(documents, page_limit, seen_before)
+    }
+
+    fn discover(&self, query: PublishDiscoverRequest) -> Result<PublishDiscoverPage> {
+        let mut candidates = BTreeMap::new();
+        if query.tags.is_empty() {
+            for record in self
+                .search(PublishSearchRequest {
+                    tag: None,
+                    limit: DISCOVER_CANDIDATE_LIMIT,
+                    cursor: None,
+                })?
+                .records
+            {
+                candidates.insert(record.id.clone(), record);
+            }
+        } else {
+            for tag in &query.tags {
+                for record in self
+                    .search(PublishSearchRequest {
+                        tag: Some(tag.clone()),
+                        limit: DISCOVER_CANDIDATE_LIMIT,
+                        cursor: None,
+                    })?
+                    .records
+                {
+                    candidates.insert(record.id.clone(), record);
+                }
+            }
+        }
+
+        Ok(rank_discover_records(candidates.into_values(), &query))
     }
 
     fn mark_author_deleted(
@@ -2326,6 +2398,7 @@ pub fn handle_request(state: &ServerState, request: HttpRequest) -> HttpResponse
         ("GET", "/v1/stats") => stats_response(state),
         ("POST", "/v1/publish") => publish_record(state, &request),
         ("GET", "/v1/publish/search") => search_publish_records(state, &request),
+        ("GET", "/v1/discover") => discover_publish_records(state, &request),
         ("POST", path) if admin_publish_path(path, "/hide").is_some() => admin_publish_moderation(
             state,
             &request,
@@ -2470,6 +2543,56 @@ fn search_publish_records(state: &ServerState, request: &HttpRequest) -> HttpRes
             "next_cursor": page.next_cursor,
             "has_more": page.has_more,
             "window_limit": PUBLISH_SEARCH_WINDOW_LIMIT,
+        }),
+    )
+}
+
+fn discover_publish_records(state: &ServerState, request: &HttpRequest) -> HttpResponse {
+    let params = parse_query(request.query().unwrap_or(""));
+    let tags = normalize_discover_tags(
+        params
+            .get("tags")
+            .into_iter()
+            .flat_map(|value| value.split(','))
+            .chain(params.get("tag").into_iter().map(String::as_str)),
+    );
+    let limit = params
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DISCOVER_DEFAULT_LIMIT)
+        .clamp(1, DISCOVER_MAX_LIMIT);
+    let seed = params
+        .get("seed")
+        .map(|seed| seed.trim())
+        .filter(|seed| !seed.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(current_discover_seed);
+
+    let page = match state.publish_store.discover(PublishDiscoverRequest {
+        tags: tags.clone(),
+        limit,
+        seed: seed.clone(),
+    }) {
+        Ok(page) => page,
+        Err(error) => {
+            return error_response(
+                500,
+                "storage_unavailable",
+                format!("Could not read publish store: {error}"),
+                true,
+            )
+        }
+    };
+
+    json_response(
+        200,
+        json!({
+            "count": page.records.len(),
+            "records": page.records,
+            "tags": tags,
+            "seed": seed,
+            "candidate_window": DISCOVER_CANDIDATE_LIMIT,
+            "has_more": false,
         }),
     )
 }
@@ -2861,6 +2984,96 @@ fn publish_record_matches_tag(entry: &StoredPublishRecord, tag: Option<&str>) ->
     .unwrap_or(true)
 }
 
+fn discover_record_matches_tags(
+    object: &SignedProtocolObject<PublishRecordPayload>,
+    tags: &[String],
+) -> bool {
+    tags.is_empty() || discover_tag_overlap(object, tags) > 0
+}
+
+fn normalize_discover_tags<'a>(tags: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for tag in tags {
+        let tag = tag.trim().to_ascii_lowercase();
+        if tag.is_empty() || normalized.iter().any(|existing| existing == &tag) {
+            continue;
+        }
+        normalized.push(tag);
+        if normalized.len() >= DISCOVER_MAX_TAGS {
+            break;
+        }
+    }
+    normalized
+}
+
+fn discover_candidate_limit(query: &PublishDiscoverRequest) -> usize {
+    DISCOVER_CANDIDATE_LIMIT.saturating_mul(query.tags.len().max(1))
+}
+
+fn rank_discover_records(
+    candidates: impl IntoIterator<Item = SignedProtocolObject<PublishRecordPayload>>,
+    query: &PublishDiscoverRequest,
+) -> PublishDiscoverPage {
+    let mut scored = candidates
+        .into_iter()
+        .filter(|record| discover_record_matches_tags(record, &query.tags))
+        .map(|record| {
+            (
+                discover_tag_overlap(&record, &query.tags),
+                discover_score(&query.seed, &record.id),
+                record.created_at,
+                record.id.clone(),
+                record,
+            )
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| right.1.cmp(&left.1))
+            .then_with(|| right.2.cmp(&left.2))
+            .then_with(|| left.3.cmp(&right.3))
+    });
+
+    PublishDiscoverPage {
+        records: scored
+            .into_iter()
+            .take(query.limit)
+            .map(|(_, _, _, _, record)| record)
+            .collect(),
+    }
+}
+
+fn discover_tag_overlap(
+    object: &SignedProtocolObject<PublishRecordPayload>,
+    tags: &[String],
+) -> usize {
+    tags.iter()
+        .filter(|tag| {
+            object
+                .payload
+                .tags
+                .iter()
+                .any(|candidate| candidate == *tag)
+        })
+        .count()
+}
+
+fn discover_score(seed: &str, publish_id: &str) -> u64 {
+    let mut hasher = Sha256::new();
+    hasher.update(seed.as_bytes());
+    hasher.update([0]);
+    hasher.update(publish_id.as_bytes());
+    let digest = hasher.finalize();
+    u64::from_be_bytes(digest[..8].try_into().expect("sha256 has at least 8 bytes"))
+}
+
+fn current_discover_seed() -> String {
+    let bucket = Utc::now().timestamp() / DISCOVER_ROTATION_SECONDS;
+    format!("time:{bucket}")
+}
+
 fn paginate_ordered_publish_records(
     ordered: Vec<StoredPublishRecord>,
     limit: usize,
@@ -3065,6 +3278,7 @@ fn discovery_response(state: &ServerState) -> HttpResponse {
                 "stats": "/v1/stats",
                 "publish": "/v1/publish",
                 "publish_search": "/v1/publish/search",
+                "discover": "/v1/discover",
                 "messages": "/v1/messages",
                 "inbox": "/v1/inbox",
                 "agent": "/agent",
@@ -3075,6 +3289,9 @@ fn discovery_response(state: &ServerState) -> HttpResponse {
                 "max_message_ttl_seconds": 604800,
                 "max_message_bytes": 65536,
                 "max_publish_body_bytes": 8192,
+                "max_discover_limit": DISCOVER_MAX_LIMIT,
+                "max_discover_tags": DISCOVER_MAX_TAGS,
+                "discover_candidate_window": DISCOVER_CANDIDATE_LIMIT,
                 "max_body_bytes": state.rate_limits().max_body_bytes,
                 "read_per_minute": state.rate_limits().read_per_minute,
                 "write_per_minute": state.rate_limits().write_per_minute
@@ -3124,6 +3341,7 @@ Useful MVP commands:
 aichan identity
 aichan publish "I am looking for AI peers." --tag agent-friends
 aichan publish-search --tag agent-friends
+aichan discover --tag agent-friends
 aichan send <peer-id> "hello"
 aichan inbox
 aichan backup create
@@ -3199,6 +3417,7 @@ fn agent_json_response(state: &ServerState) -> HttpResponse {
                 "status": "aichan status --json",
                 "publish": "aichan publish \"I am looking for AI peers.\" --tag agent-friends",
                 "publish_search": "aichan publish-search --tag agent-friends",
+                "discover": "aichan discover --tag agent-friends",
                 "send": "aichan send <peer-id> \"hello\"",
                 "inbox": "aichan inbox",
                 "backup_create": "aichan backup create",
@@ -3210,7 +3429,8 @@ fn agent_json_response(state: &ServerState) -> HttpResponse {
                 "agent_json": "/agent.json",
                 "install": "/install.sh",
                 "protocol": "/.well-known/aichan",
-                "publish_search": "/v1/publish/search"
+                "publish_search": "/v1/publish/search",
+                "discover": "/v1/discover"
             }
         }),
     )
