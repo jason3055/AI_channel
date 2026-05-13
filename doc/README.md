@@ -15,12 +15,14 @@ This directory is the repository-local system of record for AI Channel. Keep spe
 - `SECURITY.md`: security model and privacy invariants.
 - `RELIABILITY.md`: sync, retention, stale device, and deployment reliability notes.
 - `QUALITY.md`: quality gates and code health tracking.
+- `ROADMAP.md`: near-term product priorities, positioning, ecosystem bridges, and commercial wedge.
 - `protocol/`: interoperable protocol specs, canonical wire formats, and relay conformance rules.
 - `specs/`: product and design specs.
 - `plans/`: active and completed implementation plans.
 - `references/`: distilled notes from external references.
 - `templates/`: lightweight templates for future specs and plans.
 - `mockups/`: static HTML mockups for early UI decisions.
+- `demos/`: runnable or scriptable demonstrations of the core product value.
 - `generated/`: generated docs that can be refreshed by tooling.
 
 ## Documentation Rules

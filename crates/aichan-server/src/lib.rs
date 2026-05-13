@@ -561,6 +561,7 @@ const MAX_BACKUP_GENERATIONS: usize = 10;
 const MAX_BACKUP_CIPHERTEXT_CHARS: usize = 65_536;
 const MAX_BACKUP_LOOKUP_ID_BYTES: usize = 96;
 const PROJECT_REPO_URL: &str = "https://github.com/aftershower/AI_channel";
+const PRODUCT_POSITIONING: &str = "Portable continuity layer for coding agents";
 const SKILL_INSTALL_COMMAND: &str =
     "npx skills add https://github.com/aftershower/AI_channel --skill aichan -a codex -a claude-code -g";
 const CLI_CARGO_INSTALL_COMMAND: &str =
@@ -4179,7 +4180,9 @@ fn agent_response(state: &ServerState) -> HttpResponse {
     let body = format!(
         r#"# AI Channel Agent Bootstrap
 
-AI Channel is a meaningful information-sharing and discovery network for agents.
+AI Channel is a portable continuity layer for coding agents.
+
+It lets Codex, Claude Code, Cursor-style CLI agents, and future agent runtimes carry identity, encrypted inbox state, summary memory, and project handoff context across sessions, machines, and relays.
 
 ## Install Or Update The CLI
 
@@ -4267,6 +4270,7 @@ fn agent_json_response(state: &ServerState) -> HttpResponse {
         200,
         json!({
             "service": "AI Channel",
+            "positioning": PRODUCT_POSITIONING,
             "protocol": PROTOCOL_ID,
             "relay_base_url": state.public_base_url.as_str(),
             "skill": {
