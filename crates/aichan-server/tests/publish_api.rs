@@ -138,6 +138,18 @@ fn inbox_request(path_and_query: &str, signature: &AichanRequestSignature) -> Ht
         .with_header("Aichan-Signature", &signature.value)
 }
 
+fn admin_request(method: &str, path: &str, token: &str, reason: &str) -> HttpRequest {
+    HttpRequest::new(method, path)
+        .with_header("Authorization", format!("Bearer {token}"))
+        .with_json_body(
+            serde_json::to_vec(&json!({
+                "reason": reason,
+                "note": "test moderation note"
+            }))
+            .unwrap(),
+        )
+}
+
 #[test]
 fn publish_search_and_author_delete_round_trip() {
     let temp = tempfile::tempdir().unwrap();
@@ -177,6 +189,137 @@ fn publish_search_and_author_delete_round_trip() {
 
     assert_eq!(after_delete.status, 200);
     assert!(!after_delete.body_text().contains("hello public relay"));
+}
+
+#[test]
+fn admin_hide_and_restore_publish_record_round_trip() {
+    let temp = tempfile::tempdir().unwrap();
+    let state =
+        ServerState::new_with_test_admin(temp.path(), "allowed-token", "operator@example.com")
+            .unwrap();
+    let (_, publish) = signed_publish();
+
+    let create = handle_request(
+        &state,
+        HttpRequest::new("POST", "/v1/publish")
+            .with_json_body(serde_json::to_vec(&publish).unwrap()),
+    );
+    assert_eq!(create.status, 201);
+
+    let hide = handle_request(
+        &state,
+        admin_request(
+            "POST",
+            "/admin/publish/pub_test_001/hide",
+            "allowed-token",
+            "spam",
+        ),
+    );
+    assert_eq!(hide.status, 200);
+    let hide_json: serde_json::Value = serde_json::from_slice(&hide.body).unwrap();
+    assert_eq!(hide_json["hidden"], true);
+
+    let hidden_search = handle_request(
+        &state,
+        HttpRequest::new("GET", "/v1/publish/search?tag=coding"),
+    );
+    assert_eq!(hidden_search.status, 200);
+    assert!(!hidden_search.body_text().contains("hello public relay"));
+
+    let restore = handle_request(
+        &state,
+        admin_request(
+            "POST",
+            "/admin/publish/pub_test_001/restore",
+            "allowed-token",
+            "mistaken_hide",
+        ),
+    );
+    assert_eq!(restore.status, 200);
+    let restore_json: serde_json::Value = serde_json::from_slice(&restore.body).unwrap();
+    assert_eq!(restore_json["restored"], true);
+
+    let restored_search = handle_request(
+        &state,
+        HttpRequest::new("GET", "/v1/publish/search?tag=coding"),
+    );
+    assert_eq!(restored_search.status, 200);
+    assert!(restored_search.body_text().contains("hello public relay"));
+}
+
+#[test]
+fn admin_restore_rejects_author_deleted_publish_record() {
+    let temp = tempfile::tempdir().unwrap();
+    let state =
+        ServerState::new_with_test_admin(temp.path(), "allowed-token", "operator@example.com")
+            .unwrap();
+    let (signing_key, publish) = signed_publish();
+
+    let create = handle_request(
+        &state,
+        HttpRequest::new("POST", "/v1/publish")
+            .with_json_body(serde_json::to_vec(&publish).unwrap()),
+    );
+    assert_eq!(create.status, 201);
+
+    let signature =
+        signed_delete_request(&signing_key, &publish, "nonce_admin_restore", Utc::now());
+    let delete = handle_request(&state, delete_request("pub_test_001", &signature));
+    assert_eq!(delete.status, 200);
+
+    let restore = handle_request(
+        &state,
+        admin_request(
+            "POST",
+            "/admin/publish/pub_test_001/restore",
+            "allowed-token",
+            "mistaken_hide",
+        ),
+    );
+    assert_eq!(restore.status, 409);
+    assert!(restore.body_text().contains("\"author_deleted\""));
+
+    let search = handle_request(
+        &state,
+        HttpRequest::new("GET", "/v1/publish/search?tag=coding"),
+    );
+    assert_eq!(search.status, 200);
+    assert!(!search.body_text().contains("hello public relay"));
+}
+
+#[test]
+fn admin_hide_rejects_invalid_token_without_changing_visibility() {
+    let temp = tempfile::tempdir().unwrap();
+    let state =
+        ServerState::new_with_test_admin(temp.path(), "allowed-token", "operator@example.com")
+            .unwrap();
+    let (_, publish) = signed_publish();
+
+    let create = handle_request(
+        &state,
+        HttpRequest::new("POST", "/v1/publish")
+            .with_json_body(serde_json::to_vec(&publish).unwrap()),
+    );
+    assert_eq!(create.status, 201);
+
+    let hide = handle_request(
+        &state,
+        admin_request(
+            "POST",
+            "/admin/publish/pub_test_001/hide",
+            "wrong-token",
+            "spam",
+        ),
+    );
+    assert_eq!(hide.status, 401);
+    assert!(hide.body_text().contains("\"invalid_admin_auth\""));
+
+    let search = handle_request(
+        &state,
+        HttpRequest::new("GET", "/v1/publish/search?tag=coding"),
+    );
+    assert_eq!(search.status, 200);
+    assert!(search.body_text().contains("hello public relay"));
 }
 
 #[test]

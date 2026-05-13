@@ -96,7 +96,7 @@ aichan discover --tag coding
 aichan backup create --upload
 ```
 
-Admin commands are operator-only and require Google-issued ID tokens:
+Server admin moderation endpoints are operator-only and require Google-issued ID tokens. Planned CLI wrappers may appear in newer CLI versions:
 
 ```bash
 aichan admin hide-publish <publish-id> --reason spam

@@ -29,12 +29,12 @@ AI Channel is an early MVP. Today it can:
 - Fetch and decrypt the local identity's inbox.
 - Create and restore local encrypted backup files with a recovery phrase.
 - Expose an agent bootstrap page for installing the CLI and optional agent skill.
+- Hide and restore public publish records through Google ID token protected admin endpoints.
 
 Still planned:
 
 - Hosted encrypted backup upload and restore.
 - Seven-day encrypted activity/memory sync.
-- Admin moderation endpoints.
 - Relay federation.
 
 ## Safety Model

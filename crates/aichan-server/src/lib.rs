@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use aichan_core::identity::PeerId;
 use aichan_core::protocol::{
-    AichanRequestSignature, MessageEnvelopePayload, PublishRecordPayload, RequestToSign,
-    SignedProtocolObject, PROTOCOL_ID,
+    canonical_json_bytes, AichanRequestSignature, MessageEnvelopePayload, PublishRecordPayload,
+    RequestToSign, SignedProtocolObject, PROTOCOL_ID,
 };
 use anyhow::{Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -17,6 +17,7 @@ use base64::Engine;
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 #[derive(Clone)]
 pub struct ServerState {
@@ -26,6 +27,7 @@ pub struct ServerState {
     publish_store: Arc<PublishStore>,
     message_store: Arc<MessageStore>,
     request_auth: Arc<RequestAuthTracker>,
+    admin_auth: Arc<AdminAuth>,
 }
 
 impl ServerState {
@@ -79,6 +81,25 @@ impl ServerState {
             public_base_url,
             rate_limits,
             max_connections,
+            Arc::new(AdminAuth::disabled()),
+        )
+    }
+
+    pub fn new_with_test_admin(
+        data_dir: impl AsRef<Path>,
+        token: impl Into<String>,
+        principal: impl Into<String>,
+    ) -> Result<Self> {
+        let data_dir = data_dir.as_ref();
+        let publish_store = Arc::new(PublishStore::file(data_dir)?);
+        let message_store = Arc::new(MessageStore::file(data_dir)?);
+        Self::with_stores(
+            publish_store,
+            message_store,
+            "http://localhost:8080",
+            RateLimitConfig::default(),
+            DEFAULT_MAX_CONNECTIONS,
+            Arc::new(AdminAuth::static_test(token, principal)),
         )
     }
 
@@ -91,12 +112,14 @@ impl ServerState {
         let data_dir = data_dir.as_ref();
         let publish_store = Arc::new(publish_store_from_env(data_dir)?);
         let message_store = Arc::new(message_store_from_env(data_dir)?);
+        let admin_auth = Arc::new(AdminAuth::from_env()?);
         Self::with_stores(
             publish_store,
             message_store,
             public_base_url,
             rate_limits,
             max_connections,
+            admin_auth,
         )
     }
 
@@ -106,6 +129,7 @@ impl ServerState {
         public_base_url: impl Into<String>,
         rate_limits: RateLimitConfig,
         max_connections: usize,
+        admin_auth: Arc<AdminAuth>,
     ) -> Result<Self> {
         Ok(Self {
             public_base_url: Arc::new(public_base_url.into()),
@@ -114,6 +138,7 @@ impl ServerState {
             publish_store,
             message_store,
             request_auth: Arc::new(RequestAuthTracker::default()),
+            admin_auth,
         })
     }
 
@@ -207,6 +232,183 @@ impl RequestAuthTracker {
 struct RequestNonceKey {
     peer_id: String,
     nonce: String,
+}
+
+#[derive(Debug, Clone)]
+struct AdminPrincipal {
+    principal: String,
+    principal_hash: String,
+    auth_provider: &'static str,
+}
+
+#[derive(Debug)]
+enum AdminAuth {
+    Disabled,
+    GoogleTokenInfo(GoogleAdminAuth),
+    StaticTest { token: String, principal: String },
+}
+
+impl AdminAuth {
+    fn disabled() -> Self {
+        Self::Disabled
+    }
+
+    fn static_test(token: impl Into<String>, principal: impl Into<String>) -> Self {
+        Self::StaticTest {
+            token: token.into(),
+            principal: principal.into(),
+        }
+    }
+
+    fn from_env() -> Result<Self> {
+        let principals = env_non_empty("AICHAN_ADMIN_PRINCIPALS")
+            .map(|value| {
+                value
+                    .split([',', '\n'])
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if principals.is_empty() {
+            return Ok(Self::Disabled);
+        }
+
+        let audience = env_non_empty("AICHAN_ADMIN_AUDIENCE")
+            .context("AICHAN_ADMIN_AUDIENCE is required when AICHAN_ADMIN_PRINCIPALS is set")?;
+        let tokeninfo_url = env_non_empty("AICHAN_ADMIN_TOKENINFO_URL")
+            .unwrap_or_else(|| "https://oauth2.googleapis.com/tokeninfo".to_string());
+        let client = reqwest::blocking::Client::builder()
+            .timeout(REQUEST_READ_TIMEOUT)
+            .build()
+            .context("build Google tokeninfo HTTP client")?;
+
+        Ok(Self::GoogleTokenInfo(GoogleAdminAuth {
+            audience,
+            principals,
+            tokeninfo_url,
+            client,
+        }))
+    }
+
+    fn authenticate(&self, request: &HttpRequest) -> Result<AdminPrincipal> {
+        let token = bearer_token(request).context("missing Authorization bearer token")?;
+        match self {
+            Self::Disabled => anyhow::bail!("admin moderation is not configured"),
+            Self::StaticTest {
+                token: expected,
+                principal,
+            } => {
+                if token != expected {
+                    anyhow::bail!("invalid admin token");
+                }
+                Ok(AdminPrincipal::new(principal, "static_test"))
+            }
+            Self::GoogleTokenInfo(config) => config.authenticate(token),
+        }
+    }
+}
+
+impl AdminPrincipal {
+    fn new(principal: impl Into<String>, auth_provider: &'static str) -> Self {
+        let principal = principal.into();
+        let principal_hash = principal_hash(&principal);
+        Self {
+            principal,
+            principal_hash,
+            auth_provider,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct GoogleAdminAuth {
+    audience: String,
+    principals: Vec<String>,
+    tokeninfo_url: String,
+    client: reqwest::blocking::Client,
+}
+
+impl GoogleAdminAuth {
+    fn authenticate(&self, token: &str) -> Result<AdminPrincipal> {
+        let url = format!(
+            "{}?id_token={}",
+            self.tokeninfo_url.trim_end_matches('?'),
+            percent_encode_path_segment(token)
+        );
+        let response: serde_json::Value = self
+            .client
+            .get(url)
+            .send()
+            .context("request Google tokeninfo")?
+            .error_for_status()
+            .context("Google tokeninfo rejected ID token")?
+            .json()
+            .context("parse Google tokeninfo response")?;
+
+        let issuer = json_string(&response, "iss").context("tokeninfo response missing iss")?;
+        if issuer != "accounts.google.com" && issuer != "https://accounts.google.com" {
+            anyhow::bail!("invalid admin token issuer");
+        }
+
+        let audience = json_string(&response, "aud").context("tokeninfo response missing aud")?;
+        if audience != self.audience {
+            anyhow::bail!("invalid admin token audience");
+        }
+
+        let exp = json_i64(&response, "exp").context("tokeninfo response missing exp")?;
+        if exp <= Utc::now().timestamp() {
+            anyhow::bail!("expired admin token");
+        }
+
+        let principal = match json_string(&response, "email") {
+            Some(email) => {
+                if !json_bool(&response, "email_verified").unwrap_or(false) {
+                    anyhow::bail!("admin token email is not verified");
+                }
+                email
+            }
+            None => {
+                json_string(&response, "sub").context("tokeninfo response missing principal")?
+            }
+        };
+        if !self.principals.iter().any(|allowed| allowed == principal) {
+            anyhow::bail!("admin principal is not allowlisted");
+        }
+
+        Ok(AdminPrincipal::new(principal, "google_id_token"))
+    }
+}
+
+fn bearer_token(request: &HttpRequest) -> Option<&str> {
+    let header = request.header("Authorization")?.trim();
+    let (scheme, token) = header.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let token = token.trim();
+    (!token.is_empty()).then_some(token)
+}
+
+fn json_string<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(serde_json::Value::as_str)
+}
+
+fn json_i64(value: &serde_json::Value, key: &str) -> Option<i64> {
+    value
+        .get(key)
+        .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()))
+}
+
+fn json_bool(value: &serde_json::Value, key: &str) -> Option<bool> {
+    value.get(key).and_then(|value| {
+        value.as_bool().or_else(|| match value.as_str()? {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        })
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -424,10 +626,67 @@ impl HttpResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredPublishRecord {
     object: SignedProtocolObject<PublishRecordPayload>,
+    #[serde(default)]
     deleted: bool,
     #[serde(default)]
     hidden: bool,
+    #[serde(default)]
     deleted_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    hidden_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hide_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hidden_by_principal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hidden_by_hash: Option<String>,
+    #[serde(default)]
+    restored_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restore_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restored_by_principal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restored_by_hash: Option<String>,
+}
+
+impl StoredPublishRecord {
+    fn visible(object: SignedProtocolObject<PublishRecordPayload>) -> Self {
+        Self {
+            object,
+            deleted: false,
+            hidden: false,
+            deleted_at: None,
+            hidden_at: None,
+            hide_reason: None,
+            hidden_by_principal: None,
+            hidden_by_hash: None,
+            restored_at: None,
+            restore_reason: None,
+            restored_by_principal: None,
+            restored_by_hash: None,
+        }
+    }
+
+    fn preserve_admin_state(
+        object: SignedProtocolObject<PublishRecordPayload>,
+        previous: &StoredPublishRecord,
+    ) -> Self {
+        Self {
+            object,
+            deleted: false,
+            hidden: previous.hidden,
+            deleted_at: None,
+            hidden_at: previous.hidden_at,
+            hide_reason: previous.hide_reason.clone(),
+            hidden_by_principal: previous.hidden_by_principal.clone(),
+            hidden_by_hash: previous.hidden_by_hash.clone(),
+            restored_at: previous.restored_at,
+            restore_reason: previous.restore_reason.clone(),
+            restored_by_principal: previous.restored_by_principal.clone(),
+            restored_by_hash: previous.restored_by_hash.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -487,6 +746,30 @@ impl PublishStore {
             Self::Firestore(store) => store.stats(),
         }
     }
+
+    fn admin_hide(
+        &self,
+        publish_id: &str,
+        reason: &str,
+        admin: &AdminPrincipal,
+    ) -> Result<PublishModerationStatus> {
+        match self {
+            Self::File(store) => store.admin_hide(publish_id, reason, admin),
+            Self::Firestore(store) => store.admin_hide(publish_id, reason, admin),
+        }
+    }
+
+    fn admin_restore(
+        &self,
+        publish_id: &str,
+        reason: &str,
+        admin: &AdminPrincipal,
+    ) -> Result<PublishModerationStatus> {
+        match self {
+            Self::File(store) => store.admin_restore(publish_id, reason, admin),
+            Self::Firestore(store) => store.admin_restore(publish_id, reason, admin),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -501,6 +784,13 @@ enum PublishDeleteStatus {
     Deleted,
     NotFound,
     WrongPeer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PublishModerationStatus {
+    Updated(Box<SignedProtocolObject<PublishRecordPayload>>),
+    NotFound,
+    AuthorDeleted,
 }
 
 #[derive(Debug, Clone)]
@@ -551,16 +841,9 @@ impl FilePublishStore {
             if existing.deleted {
                 return Ok(PublishUpsertStatus::AuthorDeleted);
             }
-            existing.object = object;
-            existing.deleted = false;
-            existing.deleted_at = None;
+            *existing = StoredPublishRecord::preserve_admin_state(object, existing);
         } else {
-            records.push(StoredPublishRecord {
-                object,
-                deleted: false,
-                hidden: false,
-                deleted_at: None,
-            });
+            records.push(StoredPublishRecord::visible(object));
         }
 
         self.save(&records)?;
@@ -603,6 +886,74 @@ impl FilePublishStore {
         self.save(&records)?;
 
         Ok(PublishDeleteStatus::Deleted)
+    }
+
+    fn admin_hide(
+        &self,
+        publish_id: &str,
+        reason: &str,
+        admin: &AdminPrincipal,
+    ) -> Result<PublishModerationStatus> {
+        let _guard = self.lock.lock().expect("publish store mutex poisoned");
+        let mut records = self.load()?;
+        let Some(record) = records
+            .iter_mut()
+            .find(|entry| entry.object.id == publish_id)
+        else {
+            return Ok(PublishModerationStatus::NotFound);
+        };
+
+        if record.deleted {
+            return Ok(PublishModerationStatus::AuthorDeleted);
+        }
+
+        record.hidden = true;
+        record.hidden_at = Some(Utc::now());
+        record.hide_reason = Some(reason.to_string());
+        record.hidden_by_principal = Some(admin.principal.clone());
+        record.hidden_by_hash = Some(admin.principal_hash.clone());
+        record.restored_at = None;
+        record.restore_reason = None;
+        record.restored_by_principal = None;
+        record.restored_by_hash = None;
+        let object = record.object.clone();
+        self.save(&records)?;
+
+        Ok(PublishModerationStatus::Updated(Box::new(object)))
+    }
+
+    fn admin_restore(
+        &self,
+        publish_id: &str,
+        reason: &str,
+        admin: &AdminPrincipal,
+    ) -> Result<PublishModerationStatus> {
+        let _guard = self.lock.lock().expect("publish store mutex poisoned");
+        let mut records = self.load()?;
+        let Some(record) = records
+            .iter_mut()
+            .find(|entry| entry.object.id == publish_id)
+        else {
+            return Ok(PublishModerationStatus::NotFound);
+        };
+
+        if record.deleted {
+            return Ok(PublishModerationStatus::AuthorDeleted);
+        }
+
+        record.hidden = false;
+        record.hidden_at = None;
+        record.hide_reason = None;
+        record.hidden_by_principal = None;
+        record.hidden_by_hash = None;
+        record.restored_at = Some(Utc::now());
+        record.restore_reason = Some(reason.to_string());
+        record.restored_by_principal = Some(admin.principal.clone());
+        record.restored_by_hash = Some(admin.principal_hash.clone());
+        let object = record.object.clone();
+        self.save(&records)?;
+
+        Ok(PublishModerationStatus::Updated(Box::new(object)))
     }
 
     fn stats(&self) -> Result<PublicStats> {
@@ -792,21 +1143,11 @@ impl FirestorePublishStore {
                     return Ok(PublishUpsertStatus::AuthorDeleted);
                 }
 
-                let next = StoredPublishRecord {
-                    object,
-                    deleted: false,
-                    hidden: record.hidden,
-                    deleted_at: None,
-                };
+                let next = StoredPublishRecord::preserve_admin_state(object, &record);
                 self.commit_record(&name, &next, FirestorePrecondition::UpdateTime(update_time))?;
             }
             None => {
-                let record = StoredPublishRecord {
-                    object,
-                    deleted: false,
-                    hidden: false,
-                    deleted_at: None,
-                };
+                let record = StoredPublishRecord::visible(object);
                 self.commit_record(&name, &record, FirestorePrecondition::Missing)?;
             }
         }
@@ -875,6 +1216,82 @@ impl FirestorePublishStore {
         )?;
 
         Ok(PublishDeleteStatus::Deleted)
+    }
+
+    fn admin_hide(
+        &self,
+        publish_id: &str,
+        reason: &str,
+        admin: &AdminPrincipal,
+    ) -> Result<PublishModerationStatus> {
+        let name = self.document_name(publish_id);
+        let Some(FirestoreStoredDocument {
+            mut record,
+            update_time,
+        }) = self.get_record(&name)?
+        else {
+            return Ok(PublishModerationStatus::NotFound);
+        };
+
+        if record.deleted {
+            return Ok(PublishModerationStatus::AuthorDeleted);
+        }
+
+        record.hidden = true;
+        record.hidden_at = Some(Utc::now());
+        record.hide_reason = Some(reason.to_string());
+        record.hidden_by_principal = Some(admin.principal.clone());
+        record.hidden_by_hash = Some(admin.principal_hash.clone());
+        record.restored_at = None;
+        record.restore_reason = None;
+        record.restored_by_principal = None;
+        record.restored_by_hash = None;
+        let object = record.object.clone();
+        self.commit_record(
+            &name,
+            &record,
+            FirestorePrecondition::UpdateTime(update_time),
+        )?;
+
+        Ok(PublishModerationStatus::Updated(Box::new(object)))
+    }
+
+    fn admin_restore(
+        &self,
+        publish_id: &str,
+        reason: &str,
+        admin: &AdminPrincipal,
+    ) -> Result<PublishModerationStatus> {
+        let name = self.document_name(publish_id);
+        let Some(FirestoreStoredDocument {
+            mut record,
+            update_time,
+        }) = self.get_record(&name)?
+        else {
+            return Ok(PublishModerationStatus::NotFound);
+        };
+
+        if record.deleted {
+            return Ok(PublishModerationStatus::AuthorDeleted);
+        }
+
+        record.hidden = false;
+        record.hidden_at = None;
+        record.hide_reason = None;
+        record.hidden_by_principal = None;
+        record.hidden_by_hash = None;
+        record.restored_at = Some(Utc::now());
+        record.restore_reason = Some(reason.to_string());
+        record.restored_by_principal = Some(admin.principal.clone());
+        record.restored_by_hash = Some(admin.principal_hash.clone());
+        let object = record.object.clone();
+        self.commit_record(
+            &name,
+            &record,
+            FirestorePrecondition::UpdateTime(update_time),
+        )?;
+
+        Ok(PublishModerationStatus::Updated(Box::new(object)))
     }
 
     fn stats(&self) -> Result<PublicStats> {
@@ -1453,10 +1870,6 @@ fn firestore_document_from_record(
     record: &StoredPublishRecord,
 ) -> Result<serde_json::Value> {
     let object_json = serde_json::to_string(&record.object)?;
-    let deleted_at = record
-        .deleted_at
-        .map(|value| json!({ "timestampValue": firestore_timestamp(value) }))
-        .unwrap_or_else(|| json!({ "nullValue": null }));
 
     Ok(json!({
         "name": name,
@@ -1469,7 +1882,15 @@ fn firestore_document_from_record(
             "tags": firestore_string_array(&record.object.payload.tags),
             "deleted": { "booleanValue": record.deleted },
             "hidden": { "booleanValue": record.hidden },
-            "deleted_at": deleted_at,
+            "deleted_at": firestore_optional_timestamp(record.deleted_at),
+            "hidden_at": firestore_optional_timestamp(record.hidden_at),
+            "hide_reason": firestore_optional_string(record.hide_reason.as_deref()),
+            "hidden_by_principal": firestore_optional_string(record.hidden_by_principal.as_deref()),
+            "hidden_by_hash": firestore_optional_string(record.hidden_by_hash.as_deref()),
+            "restored_at": firestore_optional_timestamp(record.restored_at),
+            "restore_reason": firestore_optional_string(record.restore_reason.as_deref()),
+            "restored_by_principal": firestore_optional_string(record.restored_by_principal.as_deref()),
+            "restored_by_hash": firestore_optional_string(record.restored_by_hash.as_deref()),
             "object_json": { "stringValue": object_json }
         }
     }))
@@ -1488,12 +1909,28 @@ fn stored_record_from_firestore_document(
     let deleted = firestore_bool_field(fields, "deleted").unwrap_or(false);
     let hidden = firestore_bool_field(fields, "hidden").unwrap_or(false);
     let deleted_at = firestore_optional_timestamp_field(fields, "deleted_at")?;
+    let hidden_at = firestore_optional_timestamp_field(fields, "hidden_at")?;
+    let hide_reason = firestore_optional_string_field(fields, "hide_reason");
+    let hidden_by_principal = firestore_optional_string_field(fields, "hidden_by_principal");
+    let hidden_by_hash = firestore_optional_string_field(fields, "hidden_by_hash");
+    let restored_at = firestore_optional_timestamp_field(fields, "restored_at")?;
+    let restore_reason = firestore_optional_string_field(fields, "restore_reason");
+    let restored_by_principal = firestore_optional_string_field(fields, "restored_by_principal");
+    let restored_by_hash = firestore_optional_string_field(fields, "restored_by_hash");
 
     Ok(StoredPublishRecord {
         object,
         deleted,
         hidden,
         deleted_at,
+        hidden_at,
+        hide_reason,
+        hidden_by_principal,
+        hidden_by_hash,
+        restored_at,
+        restore_reason,
+        restored_by_principal,
+        restored_by_hash,
     })
 }
 
@@ -1686,6 +2123,18 @@ fn firestore_string_array(values: &[String]) -> serde_json::Value {
     })
 }
 
+fn firestore_optional_timestamp(value: Option<DateTime<Utc>>) -> serde_json::Value {
+    value
+        .map(|value| json!({ "timestampValue": firestore_timestamp(value) }))
+        .unwrap_or_else(|| json!({ "nullValue": null }))
+}
+
+fn firestore_optional_string(value: Option<&str>) -> serde_json::Value {
+    value
+        .map(|value| json!({ "stringValue": value }))
+        .unwrap_or_else(|| json!({ "nullValue": null }))
+}
+
 fn firestore_string_field<'a>(
     fields: &'a serde_json::Map<String, serde_json::Value>,
     name: &str,
@@ -1705,6 +2154,17 @@ fn firestore_bool_field(
         .get(name)
         .and_then(|value| value.get("booleanValue"))
         .and_then(serde_json::Value::as_bool)
+}
+
+fn firestore_optional_string_field(
+    fields: &serde_json::Map<String, serde_json::Value>,
+    name: &str,
+) -> Option<String> {
+    fields
+        .get(name)
+        .and_then(|value| value.get("stringValue"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
 }
 
 fn firestore_optional_timestamp_field(
@@ -1866,6 +2326,20 @@ pub fn handle_request(state: &ServerState, request: HttpRequest) -> HttpResponse
         ("GET", "/v1/stats") => stats_response(state),
         ("POST", "/v1/publish") => publish_record(state, &request),
         ("GET", "/v1/publish/search") => search_publish_records(state, &request),
+        ("POST", path) if admin_publish_path(path, "/hide").is_some() => admin_publish_moderation(
+            state,
+            &request,
+            admin_publish_path(path, "/hide").unwrap(),
+            AdminPublishAction::Hide,
+        ),
+        ("POST", path) if admin_publish_path(path, "/restore").is_some() => {
+            admin_publish_moderation(
+                state,
+                &request,
+                admin_publish_path(path, "/restore").unwrap(),
+                AdminPublishAction::Restore,
+            )
+        }
         ("DELETE", path) if path.starts_with("/v1/publish/") => {
             delete_publish_record(state, &request, path.trim_start_matches("/v1/publish/"))
         }
@@ -1998,6 +2472,204 @@ fn search_publish_records(state: &ServerState, request: &HttpRequest) -> HttpRes
             "window_limit": PUBLISH_SEARCH_WINDOW_LIMIT,
         }),
     )
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AdminPublishAction {
+    Hide,
+    Restore,
+}
+
+impl AdminPublishAction {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Hide => "hide",
+            Self::Restore => "restore",
+        }
+    }
+
+    fn route_template(self) -> &'static str {
+        match self {
+            Self::Hide => "/admin/publish/{publish_id}/hide",
+            Self::Restore => "/admin/publish/{publish_id}/restore",
+        }
+    }
+
+    fn success_event(self) -> &'static str {
+        match self {
+            Self::Hide => "admin.publish.hidden",
+            Self::Restore => "admin.publish.restored",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminModerationRequest {
+    reason: String,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+fn admin_publish_moderation(
+    state: &ServerState,
+    request: &HttpRequest,
+    publish_id: &str,
+    action: AdminPublishAction,
+) -> HttpResponse {
+    let admin = match state.admin_auth.authenticate(request) {
+        Ok(admin) => admin,
+        Err(error) => {
+            log_admin_publish_audit(AdminPublishAudit {
+                event_name: "admin.publish.rejected",
+                action,
+                status: 401,
+                outcome: "auth_rejected",
+                publish_id,
+                reason: None,
+                admin: None,
+                signed_object_hash: None,
+            });
+            return error_response(401, "invalid_admin_auth", error.to_string(), false);
+        }
+    };
+
+    let moderation = match parse_admin_moderation_request(&request.body) {
+        Ok(moderation) => moderation,
+        Err(error) => {
+            log_admin_publish_audit(AdminPublishAudit {
+                event_name: "admin.publish.rejected",
+                action,
+                status: 400,
+                outcome: "invalid_request",
+                publish_id,
+                reason: None,
+                admin: Some(&admin),
+                signed_object_hash: None,
+            });
+            return error_response(400, "invalid_admin_request", error.to_string(), false);
+        }
+    };
+
+    let result = match action {
+        AdminPublishAction::Hide => {
+            state
+                .publish_store
+                .admin_hide(publish_id, &moderation.reason, &admin)
+        }
+        AdminPublishAction::Restore => {
+            state
+                .publish_store
+                .admin_restore(publish_id, &moderation.reason, &admin)
+        }
+    };
+
+    match result {
+        Ok(PublishModerationStatus::Updated(object)) => {
+            let signed_object_hash = signed_object_hash(object.as_ref()).ok();
+            log_admin_publish_audit(AdminPublishAudit {
+                event_name: action.success_event(),
+                action,
+                status: 200,
+                outcome: "success",
+                publish_id,
+                reason: Some(&moderation.reason),
+                admin: Some(&admin),
+                signed_object_hash: signed_object_hash.as_deref(),
+            });
+
+            match action {
+                AdminPublishAction::Hide => {
+                    json_response(200, json!({ "hidden": true, "id": publish_id }))
+                }
+                AdminPublishAction::Restore => {
+                    json_response(200, json!({ "restored": true, "id": publish_id }))
+                }
+            }
+        }
+        Ok(PublishModerationStatus::NotFound) => {
+            log_admin_publish_audit(AdminPublishAudit {
+                event_name: "admin.publish.rejected",
+                action,
+                status: 404,
+                outcome: "not_found",
+                publish_id,
+                reason: Some(&moderation.reason),
+                admin: Some(&admin),
+                signed_object_hash: None,
+            });
+            error_response(404, "not_found", "Publish record not found.", false)
+        }
+        Ok(PublishModerationStatus::AuthorDeleted) => {
+            log_admin_publish_audit(AdminPublishAudit {
+                event_name: "admin.publish.rejected",
+                action,
+                status: 409,
+                outcome: "author_deleted",
+                publish_id,
+                reason: Some(&moderation.reason),
+                admin: Some(&admin),
+                signed_object_hash: None,
+            });
+            let message = match action {
+                AdminPublishAction::Hide => {
+                    "Publish record was deleted by its author and cannot be hidden by admin."
+                }
+                AdminPublishAction::Restore => {
+                    "Publish record was deleted by its author and cannot be restored by admin."
+                }
+            };
+            error_response(409, "author_deleted", message, false)
+        }
+        Err(error) => {
+            log_admin_publish_audit(AdminPublishAudit {
+                event_name: "admin.publish.rejected",
+                action,
+                status: 500,
+                outcome: "storage_error",
+                publish_id,
+                reason: Some(&moderation.reason),
+                admin: Some(&admin),
+                signed_object_hash: None,
+            });
+            error_response(
+                500,
+                "storage_unavailable",
+                format!("Could not write publish store: {error}"),
+                true,
+            )
+        }
+    }
+}
+
+fn parse_admin_moderation_request(body: &[u8]) -> Result<AdminModerationRequest> {
+    let request: AdminModerationRequest =
+        serde_json::from_slice(body).context("invalid JSON admin moderation request")?;
+    let reason = request.reason.trim();
+    if reason.is_empty() {
+        anyhow::bail!("reason is required");
+    }
+    if reason.len() > 120 {
+        anyhow::bail!("reason is too long");
+    }
+    if request
+        .note
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|note| note.len() > 500)
+    {
+        anyhow::bail!("note is too long");
+    }
+
+    Ok(AdminModerationRequest {
+        reason: reason.to_string(),
+        note: request.note,
+    })
+}
+
+fn admin_publish_path<'a>(path: &'a str, suffix: &str) -> Option<&'a str> {
+    let tail = path.strip_prefix("/admin/publish/")?;
+    let publish_id = tail.strip_suffix(suffix)?;
+    (!publish_id.is_empty() && !publish_id.contains('/')).then_some(publish_id)
 }
 
 fn stats_response(state: &ServerState) -> HttpResponse {
@@ -2949,6 +3621,54 @@ fn response(status: u16, content_type: &str, body: Vec<u8>) -> HttpResponse {
     }
 }
 
+struct AdminPublishAudit<'a> {
+    event_name: &'static str,
+    action: AdminPublishAction,
+    status: u16,
+    outcome: &'static str,
+    publish_id: &'a str,
+    reason: Option<&'a str>,
+    admin: Option<&'a AdminPrincipal>,
+    signed_object_hash: Option<&'a str>,
+}
+
+fn log_admin_publish_audit(audit: AdminPublishAudit<'_>) {
+    let admin = audit
+        .admin
+        .map(|principal| {
+            json!({
+                "principal": principal.principal.as_str(),
+                "principal_hash": principal.principal_hash.as_str(),
+                "auth_provider": principal.auth_provider,
+            })
+        })
+        .unwrap_or_else(|| json!(null));
+    let line = json!({
+        "schema_version": 1,
+        "severity": if audit.status >= 400 { "WARNING" } else { "NOTICE" },
+        "message": audit.event_name.replace('.', " "),
+        "event": {
+            "name": audit.event_name,
+            "kind": "audit"
+        },
+        "service": "aichan-server",
+        "component": "admin_publish_handler",
+        "route": audit.action.route_template(),
+        "method": "POST",
+        "status": audit.status,
+        "outcome": audit.outcome,
+        "admin": admin,
+        "moderation": {
+            "publish_id": audit.publish_id,
+            "action": audit.action.as_str(),
+            "reason": audit.reason,
+            "signed_object_hash": audit.signed_object_hash,
+        },
+        "timestamp": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+    });
+    eprintln!("{line}");
+}
+
 fn log_event(name: &str, fields: serde_json::Value) {
     let line = json!({
         "severity": "INFO",
@@ -2960,6 +3680,20 @@ fn log_event(name: &str, fields: serde_json::Value) {
         "timestamp": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
     });
     eprintln!("{line}");
+}
+
+fn signed_object_hash(object: &SignedProtocolObject<PublishRecordPayload>) -> Result<String> {
+    let bytes = canonical_json_bytes(object).context("canonicalize signed publish object")?;
+    Ok(format!("sha256:{}", sha256_hex(&bytes)))
+}
+
+fn principal_hash(principal: &str) -> String {
+    format!("sha256:{}", sha256_hex(principal.as_bytes()))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn env_non_empty(name: &str) -> Option<String> {
@@ -3141,11 +3875,6 @@ mod tests {
             .sign(&signing_key)
             .unwrap();
 
-        StoredPublishRecord {
-            object,
-            deleted: false,
-            hidden: false,
-            deleted_at: None,
-        }
+        StoredPublishRecord::visible(object)
     }
 }
