@@ -4096,7 +4096,13 @@ fn component_for_event(name: &str) -> &'static str {
 }
 
 fn log_environment() -> String {
-    env_non_empty("AICHAN_ENV").unwrap_or_else(|| "local".to_string())
+    log_environment_from(env_non_empty("AICHAN_ENV"), env_non_empty("K_SERVICE"))
+}
+
+fn log_environment_from(aichan_env: Option<String>, cloud_run_service: Option<String>) -> String {
+    aichan_env
+        .or_else(|| cloud_run_service.map(|_| "prod".to_string()))
+        .unwrap_or_else(|| "local".to_string())
 }
 
 fn release_label() -> String {
@@ -4313,6 +4319,22 @@ mod tests {
         assert_eq!(log["error"]["category"], json!("validation"));
         assert_eq!(log["error"]["retryable"], json!(false));
         assert!(!log.to_string().contains("pub_sensitive_001"));
+    }
+
+    #[test]
+    fn log_environment_defaults_to_prod_on_cloud_run() {
+        assert_eq!(
+            log_environment_from(
+                Some("staging".to_string()),
+                Some("aichan-server".to_string())
+            ),
+            "staging"
+        );
+        assert_eq!(
+            log_environment_from(None, Some("aichan-server".to_string())),
+            "prod"
+        );
+        assert_eq!(log_environment_from(None, None), "local");
     }
 
     fn firestore_test_record(publish_id: &str, body: &str) -> StoredPublishRecord {
