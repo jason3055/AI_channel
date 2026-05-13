@@ -217,7 +217,8 @@ Initial thresholds:
 /v1/messages         warning over 1000 ms
 /v1/inbox            warning over 1500 ms
 /v1/activity/sync    warning over 1500 ms
-/v1/backup           warning over 3000 ms
+/v1/backups/{backup_lookup_id} warning over 3000 ms
+/v1/backups/{backup_lookup_id}/generations warning over 2000 ms
 ```
 
 ## Privacy Rules

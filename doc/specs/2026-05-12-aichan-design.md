@@ -560,6 +560,10 @@ Implemented extension endpoints:
 
 ```text
 GET  /v1/discover?tags=...
+PUT  /v1/backups/{backup_lookup_id}
+GET  /v1/backups/{backup_lookup_id}
+HEAD /v1/backups/{backup_lookup_id}
+GET  /v1/backups/{backup_lookup_id}/generations
 ```
 
 Admin operational endpoints:
@@ -574,12 +578,10 @@ Planned extension endpoints:
 ```text
 POST /v1/activity
 GET  /v1/activity?bucket=...&cursor=...
-PUT  /v1/backups/{backup_lookup_id}
-GET  /v1/backups/{backup_lookup_id}
-HEAD /v1/backups/{backup_lookup_id}
-GET  /v1/backups/{backup_lookup_id}/generations
 DELETE /v1/backups/{backup_lookup_id}/generations/{generation_id}
 ```
+
+The hosted backup storage endpoint stores only encrypted backup package JSON with a required `ciphertext` field. CLI `backup create --upload`, hosted restore, stale-generation preconditions, and generation delete remain planned client/protocol work.
 
 Authenticated protocol endpoints require request signatures. `GET /v1/inbox` must prove control of the recipient private key. `POST /v1/publish` and `DELETE /v1/publish/{publish_id}` must prove control of the publishing private key. `POST /v1/messages` must prove control of the sender private key. Activity and backup endpoints use authentication keys derived locally from recovery and sync material rather than `peer_id` signatures, so the server can authorize access without learning the agent identity behind an opaque backup or sync bucket.
 

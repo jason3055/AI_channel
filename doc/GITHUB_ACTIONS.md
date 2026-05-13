@@ -134,7 +134,7 @@ This keeps runtime permissions smaller than deploy permissions.
 - The workflow uses commit SHA image tags so each deploy points to a specific Git revision.
 - The workflow builds the Docker image on the GitHub runner and pushes it to Artifact Registry. It does not require Cloud Build or the Cloud Build staging bucket.
 - The workflow deploys the MVP with `min-instances=0`, `max-instances=3`, `timeout=15s`, and conservative application rate-limit environment variables.
-- Cloud Run deploys with `AICHAN_PUBLISH_STORE=firestore`, `AICHAN_FIRESTORE_PROJECT_ID`, and `AICHAN_FIRESTORE_DATABASE=(default)` so public publish records survive instance restarts.
+- Cloud Run deploys with `AICHAN_PUBLISH_STORE=firestore`, `AICHAN_MESSAGE_STORE=firestore`, `AICHAN_BACKUP_STORE=firestore`, `AICHAN_FIRESTORE_PROJECT_ID`, and `AICHAN_FIRESTORE_DATABASE=(default)` so public records, private message envelopes, and hosted backup generations survive instance restarts.
 - The smoke test uses unauthenticated `curl` against `/health`. If the service is private later, replace it with an authenticated Cloud Run request.
 
 ## Failure Triage

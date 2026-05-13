@@ -603,6 +603,9 @@ fn health_and_discovery_are_available_before_storage_setup() {
     assert!(discovery.body_text().contains("\"inbox\":\"/v1/inbox\""));
     assert!(discovery
         .body_text()
+        .contains("\"backups\":\"/v1/backups\""));
+    assert!(discovery
+        .body_text()
         .contains("\"discover\":\"/v1/discover\""));
 }
 
@@ -750,4 +753,110 @@ fn oversized_publish_body_is_rejected_before_json_parse() {
 
     assert_eq!(response.status, 413);
     assert!(response.body_text().contains("\"payload_too_large\""));
+}
+
+#[test]
+fn hosted_backup_upload_download_head_and_generations_round_trip() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = ServerState::new(temp.path()).unwrap();
+    let backup = json!({
+        "version": 1,
+        "created_at": "2026-05-13T15:30:00Z",
+        "encryption": {
+            "suite": "aichan.backup.chacha20poly1305.hkdf-sha256.v1",
+            "kdf": "hkdf-sha256",
+            "salt": "salt_test",
+            "nonce": "nonce_test"
+        },
+        "ciphertext": "ciphertext_test_001"
+    });
+
+    let upload = handle_request(
+        &state,
+        HttpRequest::new("PUT", "/v1/backups/backup_lookup_001")
+            .with_header("Aichan-Backup-Auth", "backup-auth-secret")
+            .with_json_body(serde_json::to_vec(&backup).unwrap()),
+    );
+
+    assert_eq!(upload.status, 201);
+    let upload_body: serde_json::Value = serde_json::from_str(&upload.body_text()).unwrap();
+    let generation_id = upload_body["generation_id"].as_str().unwrap();
+    assert!(generation_id.starts_with("gen_"));
+    assert!(upload_body.to_string().contains("backup_lookup_001"));
+    assert!(!upload_body.to_string().contains("backup-auth-secret"));
+
+    let download = handle_request(
+        &state,
+        HttpRequest::new("GET", "/v1/backups/backup_lookup_001")
+            .with_header("Aichan-Backup-Auth", "backup-auth-secret"),
+    );
+
+    assert_eq!(download.status, 200);
+    let download_body: serde_json::Value = serde_json::from_str(&download.body_text()).unwrap();
+    assert_eq!(download_body["generation_id"], generation_id);
+    assert_eq!(download_body["backup"]["ciphertext"], "ciphertext_test_001");
+    assert!(!download_body.to_string().contains("backup-auth-secret"));
+
+    let head = handle_request(
+        &state,
+        HttpRequest::new("HEAD", "/v1/backups/backup_lookup_001")
+            .with_header("Aichan-Backup-Auth", "backup-auth-secret"),
+    );
+
+    assert_eq!(head.status, 200);
+    assert!(head.body.is_empty());
+    assert_eq!(
+        head.headers.get("Aichan-Backup-Generation").unwrap(),
+        generation_id
+    );
+
+    let generations = handle_request(
+        &state,
+        HttpRequest::new("GET", "/v1/backups/backup_lookup_001/generations")
+            .with_header("Aichan-Backup-Auth", "backup-auth-secret"),
+    );
+
+    assert_eq!(generations.status, 200);
+    let generations_body: serde_json::Value =
+        serde_json::from_str(&generations.body_text()).unwrap();
+    assert_eq!(generations_body["count"], 1);
+    assert_eq!(
+        generations_body["generations"][0]["generation_id"],
+        generation_id
+    );
+    assert!(generations_body["generations"][0].get("backup").is_none());
+
+    let wrong_auth = handle_request(
+        &state,
+        HttpRequest::new("GET", "/v1/backups/backup_lookup_001")
+            .with_header("Aichan-Backup-Auth", "wrong-secret"),
+    );
+
+    assert_eq!(wrong_auth.status, 401);
+    assert!(wrong_auth.body_text().contains("invalid_backup_auth"));
+}
+
+#[test]
+fn hosted_backup_rejects_plaintext_private_material() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = ServerState::new(temp.path()).unwrap();
+    let plaintext = json!({
+        "identity": {
+            "private_key": "do not upload this"
+        },
+        "memory": {
+            "summary": "plaintext memory"
+        },
+        "recovery_phrase": "aichan-rp-secret"
+    });
+
+    let response = handle_request(
+        &state,
+        HttpRequest::new("PUT", "/v1/backups/backup_lookup_plaintext")
+            .with_header("Aichan-Backup-Auth", "backup-auth-secret")
+            .with_json_body(serde_json::to_vec(&plaintext).unwrap()),
+    );
+
+    assert_eq!(response.status, 400);
+    assert!(response.body_text().contains("invalid_backup_package"));
 }

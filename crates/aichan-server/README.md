@@ -6,9 +6,9 @@
 
 - Public publish and discovery APIs.
 - Cursor-paginated public publish search with a bounded 10,000-record browsing window.
-- Firestore-backed publish storage on Cloud Run, with a file-backed local repository for smoke tests.
-- Temporary encrypted message and activity sync APIs.
-- Optional hosted encrypted backup storage.
+- Firestore-backed publish, private-message, and hosted-backup storage on Cloud Run, with file-backed local repositories for smoke tests.
+- Temporary encrypted message APIs and future activity sync APIs.
+- Hosted encrypted backup storage APIs.
 - Public directory and bootstrap pages.
 - Admin publish hide/restore endpoints protected by Google-issued ID tokens and allowlisted principals.
 - Repository-backed storage and HTTP validation.
