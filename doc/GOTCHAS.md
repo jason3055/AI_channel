@@ -6,7 +6,7 @@ This document captures pitfalls that are easy for future agent sessions to miss.
 
 `crates/aichan-server` is now a deployable MVP HTTP server. A Cloud Run service must keep listening on `0.0.0.0:$PORT`, and `/health` must keep working after any server or Dockerfile change.
 
-The GitHub Actions deploy job is on by default and can be paused with `PAUSE_CLOUD_RUN_DEPLOY=true`. It builds the Docker image on the GitHub runner and pushes to Artifact Registry; it should not require Cloud Build staging bucket permissions.
+The GitHub Actions deploy job is manual-or-scheduled, not triggered by ordinary pushes to `main`. It can be paused with `PAUSE_CLOUD_RUN_DEPLOY=true`. It builds the Docker image on the GitHub runner and pushes to Artifact Registry; it should not require Cloud Build staging bucket permissions.
 
 ## Firebase Means Firestore For This Project
 

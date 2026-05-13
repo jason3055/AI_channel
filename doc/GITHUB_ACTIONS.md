@@ -1,22 +1,22 @@
 # GitHub Actions
 
-AI Channel deploys from `main` by default once the server is actually deployable. The workflow is present now and has a readiness check so early pushes can verify the Rust workspace without failing on a missing Dockerfile.
+AI Channel verifies `main` by default, but production deploys are manual or scheduled. The workflow has a readiness check so early pushes can verify the Rust workspace without failing on a missing Dockerfile.
 
 ## Current Status
 
-`.github/workflows/deploy.yml` starts on every push to `main`, then runs a lightweight changed-path check before doing expensive work.
+`.github/workflows/deploy.yml` starts on every push to `main`, on manual workflow dispatch, and on the weekly production deploy window. Pushes to `main` run a lightweight changed-path check and Rust verification when relevant, but they do not deploy production by themselves.
 
 `.github/workflows/release.yml` starts on pushed tags that match `v*.*.*`. It verifies the Rust workspace, builds `aichan` release archives for supported macOS/Linux targets, writes `SHA256SUMS`, creates GitHub artifact attestations, and publishes a GitHub Release.
 
 Before publishing, the release workflow verifies that the tag version matches the three Rust crate versions and the corresponding package entries in `Cargo.lock`.
 
-The deploy job is on by default. It is skipped only when this repository variable is set:
+Production deploy is intentionally separated from ordinary commits. The deploy job runs only for manual runs from the GitHub Actions **Run workflow** button or for the scheduled weekly production deploy window. It is also skipped when this repository variable is set:
 
 ```text
 PAUSE_CLOUD_RUN_DEPLOY=true
 ```
 
-Rust verification runs only when Rust, Docker, workflow, or deploy-relevant source paths changed. Cloud Run deployment runs only when server/deploy-relevant paths changed. Documentation-only pushes such as `README.md` or `doc/**` changes do not rebuild the Docker image and do not deploy Cloud Run. Manual `workflow_dispatch` still forces verification and deployment.
+Rust verification runs only when Rust, Docker, workflow, or deploy-relevant source paths changed. Cloud Run deployment runs only when server/deploy-relevant paths changed and the workflow was started manually or by the scheduled weekly deploy. Documentation-only pushes such as `README.md` or `doc/**` changes do not rebuild the Docker image and do not deploy Cloud Run. Manual `workflow_dispatch` still forces verification and deployment.
 
 Inside the deploy job, the actual Cloud Run deploy steps also require a root `Dockerfile` and required Google Cloud repository variables. If the variables are missing while you are still preparing GCP, the job emits a notice and exits successfully after verification.
 
@@ -35,9 +35,18 @@ push to main
   -> changed-path check
   -> if only docs/non-code changed, skip Rust verification and Cloud Run deploy
   -> cargo fmt --all -- --check
-  -> check tag, crate, and Cargo.lock version alignment
   -> cargo test --workspace
   -> cargo clippy --workspace --all-targets -- -D warnings
+  -> stop before production deploy
+```
+
+```text
+manual Run workflow or weekly scheduled deploy
+  -> changed-path check
+  -> cargo fmt --all -- --check
+  -> cargo test --workspace
+  -> cargo clippy --workspace --all-targets -- -D warnings
+  -> production environment gate
   -> Google OIDC / Workload Identity Federation
   -> GitHub runner builds the Docker image
   -> Artifact Registry stores the image
@@ -104,7 +113,7 @@ GCP_WORKLOAD_IDENTITY_PROVIDER=projects/123456789012/locations/global/workloadId
 AICHAN_PUBLIC_BASE_URL=https://aichan-server-...run.app
 ```
 
-`PAUSE_CLOUD_RUN_DEPLOY` is optional. If it is missing or `false`, deployment is considered enabled. Set it to `true` only when you want to temporarily stop main-branch deploys.
+`PAUSE_CLOUD_RUN_DEPLOY` is optional. If it is missing or `false`, deployment is considered enabled for manual and scheduled production deploys. Set it to `true` when you want to temporarily stop all production deploys.
 
 The first deploy can leave `AICHAN_PUBLIC_BASE_URL` blank and update it after Cloud Run returns the service URL. Once the stable URL is known, set the variable and redeploy.
 
@@ -150,11 +159,13 @@ This keeps runtime permissions smaller than deploy permissions.
 
 ## Workflow Guardrails
 
-- The deploy job is on by default and can be paused with `PAUSE_CLOUD_RUN_DEPLOY=true`.
+- The deploy job is manual-or-scheduled by default and can be paused with `PAUSE_CLOUD_RUN_DEPLOY=true`.
 - The changed-path check skips Rust verification and Cloud Run deployment for documentation-only pushes.
 - CLI-only changes run Rust verification but skip Cloud Run deployment.
-- Server/core/Docker/workflow changes run Rust verification and Cloud Run deployment.
+- Server/core/Docker/workflow changes run Rust verification on push; production deploy waits for a manual or scheduled run.
 - Manual workflow dispatch forces both verification and Cloud Run deployment.
+- The scheduled production deploy currently runs once per week on Friday at 16:00 UTC.
+- The deploy job uses the GitHub `production` environment so the repository can add required reviewers without changing the workflow again.
 - The deploy job checks for a root `Dockerfile` before building. Without a Dockerfile, deploy steps are skipped successfully.
 - The workflow does not grant public access to the Cloud Run service. Configure public access once in Google Cloud, then let deployments preserve it.
 - The workflow uses commit SHA image tags so each deploy points to a specific Git revision.

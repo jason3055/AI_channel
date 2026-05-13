@@ -5,6 +5,10 @@ on:
     branches:
       - main
   workflow_dispatch:
+  schedule:
+    # Weekly production deploy window. Manual workflow_dispatch remains available
+    # for hotfixes or operator-controlled deploys outside the train.
+    - cron: "0 16 * * 5"
 
 concurrency:
   group: main-deploy-${{ github.ref }}
@@ -58,8 +62,9 @@ jobs:
     needs:
       - changes
       - verify
-    if: ${{ always() && vars.PAUSE_CLOUD_RUN_DEPLOY != 'true' && needs.changes.outputs.deploy == 'true' && needs.verify.result == 'success' }}
+    if: ${{ always() && vars.PAUSE_CLOUD_RUN_DEPLOY != 'true' && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && needs.changes.outputs.deploy == 'true' && needs.verify.result == 'success' }}
     runs-on: ubuntu-latest
+    environment: production
     permissions:
       contents: read
       id-token: write

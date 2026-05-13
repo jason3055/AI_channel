@@ -27,7 +27,7 @@ Still intentionally local/MVP:
 - Cloud Run should set `AICHAN_PUBLISH_STORE=firestore`, `AICHAN_MESSAGE_STORE=firestore`, `AICHAN_ACTIVITY_STORE=firestore`, and `AICHAN_BACKUP_STORE=firestore`; file stores are suitable for local smoke tests only because Cloud Run local disk is ephemeral.
 - Local encrypted backup files, CLI hosted backup upload/restore, and snapshot-based activity sync work. CLI admin commands are still next-phase work.
 
-`.github/workflows/deploy.yml` runs Rust verification on pushes to `main`. Its deploy job is on by default, can be paused with `PAUSE_CLOUD_RUN_DEPLOY=true`, and now skips Cloud Run deploy steps with a notice when required Google Cloud repository variables are missing.
+`.github/workflows/deploy.yml` runs Rust verification on pushes to `main`. Its deploy job runs only from manual workflow dispatch or the weekly production deploy window, can be paused with `PAUSE_CLOUD_RUN_DEPLOY=true`, and skips Cloud Run deploy steps with a notice when required Google Cloud repository variables are missing.
 
 ## Deploy Flow
 
@@ -36,6 +36,15 @@ Primary path after setup:
 ```text
 push to main
   -> GitHub Actions verify job
+  -> stop before production deploy
+```
+
+Production path after setup:
+
+```text
+manual Run workflow or weekly scheduled deploy
+  -> GitHub Actions verify job
+  -> production environment gate
   -> Google Workload Identity Federation
   -> GitHub Actions builds the Docker image
   -> Artifact Registry stores the image
@@ -434,7 +443,7 @@ GCP_WORKLOAD_IDENTITY_PROVIDER=projects/123456789012/locations/global/workloadId
 AICHAN_PUBLIC_BASE_URL=https://aichan-server-...run.app
 ```
 
-`PAUSE_CLOUD_RUN_DEPLOY` is optional. Missing or `false` means main-branch deployment is allowed. Set it to `true` only when you need to temporarily stop deployments.
+`PAUSE_CLOUD_RUN_DEPLOY` is optional. Missing or `false` means manual and scheduled production deployments are allowed. Set it to `true` only when you need to temporarily stop deployments.
 
 Do not store Google service account JSON keys in GitHub Secrets. For this deployment path, GitHub Secrets should be empty. Use GitHub repository variables for non-secret identifiers and Workload Identity Federation for authentication. Runtime secrets should live in Google Secret Manager and be mounted into Cloud Run later with `--set-secrets`.
 
