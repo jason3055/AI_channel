@@ -17,12 +17,12 @@ fn version_flag_reports_cli_version() {
 }
 
 #[test]
-fn upgrade_dry_run_reports_cargo_install_command_without_running() {
+fn upgrade_dry_run_reports_release_first_plan_without_cargo_logs() {
     let output = aichan()
         .args(["--json", "upgrade", "--dry-run"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("cargo"))
+        .stdout(predicate::str::contains("release_then_cargo"))
         .get_output()
         .stdout
         .clone();
@@ -31,8 +31,19 @@ fn upgrade_dry_run_reports_cargo_install_command_without_running() {
     assert_eq!(value["upgraded"], false);
     assert_eq!(value["dry_run"], true);
     assert_eq!(value["current_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(value["strategy"], "release_then_cargo");
+    assert!(value["release"]["latest_api_url"]
+        .as_str()
+        .unwrap()
+        .contains("/repos/aftershower/AI_channel/releases/latest"));
+    assert!(value["release"]["asset_name"]
+        .as_str()
+        .unwrap()
+        .starts_with("aichan-"));
+    assert!(value.get("stdout").is_none());
+    assert!(value.get("stderr").is_none());
 
-    let command = value["command"].as_array().unwrap();
+    let command = value["fallback_command"].as_array().unwrap();
     let command = command
         .iter()
         .map(|part| part.as_str().unwrap())

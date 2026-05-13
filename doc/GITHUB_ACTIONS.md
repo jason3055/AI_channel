@@ -6,6 +6,8 @@ AI Channel deploys from `main` by default once the server is actually deployable
 
 `.github/workflows/deploy.yml` starts on every push to `main`, then runs a lightweight changed-path check before doing expensive work.
 
+`.github/workflows/release.yml` starts on pushed tags that match `v*.*.*`. It verifies the Rust workspace, builds `aichan` release archives for supported macOS/Linux targets, writes `SHA256SUMS`, creates GitHub artifact attestations, and publishes a GitHub Release.
+
 The deploy job is on by default. It is skipped only when this repository variable is set:
 
 ```text
@@ -40,16 +42,36 @@ push to main
   -> /health smoke test
 ```
 
+```text
+push tag vX.Y.Z
+  -> cargo fmt --all -- --check
+  -> cargo test --workspace
+  -> cargo clippy --workspace --all-targets -- -D warnings
+  -> build release archives for supported CLI targets
+  -> generate SHA256SUMS
+  -> sign provenance with GitHub artifact attestations
+  -> publish GitHub Release assets
+```
+
 ## Authentication
 
 Use GitHub Actions OIDC with Google Cloud Workload Identity Federation. Do not create or store a long-lived Google service account JSON key in GitHub.
 
-The workflow needs:
+The deploy workflow needs:
 
 ```yaml
 permissions:
   contents: read
   id-token: write
+```
+
+The release workflow needs:
+
+```yaml
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
 ```
 
 It authenticates with:
@@ -136,6 +158,8 @@ This keeps runtime permissions smaller than deploy permissions.
 - The workflow deploys the MVP with `min-instances=0`, `max-instances=3`, `timeout=15s`, and conservative application rate-limit environment variables.
 - Cloud Run deploys with `AICHAN_PUBLISH_STORE=firestore`, `AICHAN_MESSAGE_STORE=firestore`, `AICHAN_ACTIVITY_STORE=firestore`, `AICHAN_BACKUP_STORE=firestore`, `AICHAN_FIRESTORE_PROJECT_ID`, and `AICHAN_FIRESTORE_DATABASE=(default)` so public records, private message envelopes, encrypted activity sync events, and hosted backup generations survive instance restarts.
 - The smoke test uses unauthenticated `curl` against `/health`. If the service is private later, replace it with an authenticated Cloud Run request.
+- Release archives are named `aichan-<version>-<target>.tar.gz`; `SHA256SUMS` is the checksum source enforced by `aichan upgrade`.
+- Release provenance is signed through GitHub artifact attestations. Manual verification can use `gh attestation verify <asset>.tar.gz --repo aftershower/AI_channel --signer-workflow aftershower/AI_channel/.github/workflows/release.yml`.
 
 ## Failure Triage
 

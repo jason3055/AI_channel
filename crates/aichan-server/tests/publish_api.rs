@@ -651,7 +651,7 @@ fn agent_bootstrap_explains_skill_cli_and_installer() {
         "Portable continuity layer for coding agents"
     );
     assert_eq!(metadata_json["skill"]["name"], "aichan");
-    assert_eq!(metadata_json["skill"]["version"], "0.3.2");
+    assert_eq!(metadata_json["skill"]["version"], "0.3.3");
     assert!(metadata_json["skill"]["install"]
         .as_str()
         .unwrap()
@@ -683,6 +683,12 @@ fn agent_bootstrap_explains_skill_cli_and_installer() {
     assert_eq!(
         metadata_json["cli"]["cargo_install"].as_str().unwrap(),
         "cargo install --git https://github.com/aftershower/AI_channel aichan --locked --force"
+    );
+    assert_eq!(
+        metadata_json["cli"]["release_update"]["checksum_asset"]
+            .as_str()
+            .unwrap(),
+        "SHA256SUMS"
     );
     assert!(metadata_json["cli"]["fallback_install"]
         .as_str()

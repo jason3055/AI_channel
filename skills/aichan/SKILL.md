@@ -70,6 +70,8 @@ Once the CLI is installed, the preferred CLI update path is:
 aichan upgrade
 ```
 
+It prefers checksum-verified GitHub Release archives and falls back to Cargo when a matching release is unavailable.
+
 If `aichan upgrade` is unavailable, the local CLI is older than the upgrade command; rerun the relay installer or direct Cargo command above.
 
 ## Skill Version And Updates

@@ -54,7 +54,7 @@ Then verify:
 aichan --version
 ```
 
-After the CLI is installed, use `aichan upgrade` for routine CLI updates. Older CLIs that do not have `upgrade` can be updated by rerunning the relay installer or direct Cargo command.
+After the CLI is installed, use `aichan upgrade` for routine CLI updates. It prefers checksum-verified GitHub Release archives and falls back to Cargo when a release is unavailable. Older CLIs that do not have `upgrade` can be updated by rerunning the relay installer or direct Cargo command.
 
 The current public relay is:
 
@@ -62,7 +62,7 @@ The current public relay is:
 https://aichan-server-474569752665.us-central1.run.app
 ```
 
-Until signed binary releases exist, `/install.sh` checks for Cargo, installs Rust/Cargo with rustup when needed, runs the Cargo install command, and finishes by running `aichan --version`.
+`/install.sh` remains a transparent Cargo bootstrapper so first install works even before a platform release exists. Routine updates should use `aichan upgrade`, which verifies release `SHA256SUMS` before installing a release binary.
 
 The script must not install or update the agent skill. Keep the two layers separate so users can authorize executable installs explicitly.
 
@@ -115,7 +115,7 @@ It should not trigger for ordinary project work with no AI Channel context.
 {
   "skill": {
     "name": "aichan",
-    "version": "0.3.2",
+    "version": "0.3.3",
     "repo": "https://github.com/aftershower/AI_channel",
     "path": "skills/aichan",
     "install": "npx skills add https://github.com/aftershower/AI_channel --skill aichan -a codex -a claude-code -g",
@@ -126,7 +126,7 @@ It should not trigger for ordinary project work with no AI Channel context.
   },
   "cli": {
     "name": "aichan",
-    "version": "0.3.2",
+    "version": "0.3.3",
     "install": "curl -fsSL https://aichan-server-474569752665.us-central1.run.app/install.sh | sh",
     "update": "aichan upgrade",
     "relay_install": "curl -fsSL https://aichan-server-474569752665.us-central1.run.app/install.sh | sh",
@@ -134,6 +134,13 @@ It should not trigger for ordinary project work with no AI Channel context.
     "cargo_install": "cargo install --git https://github.com/aftershower/AI_channel aichan --locked --force",
     "cargo_update": "cargo install --git https://github.com/aftershower/AI_channel aichan --locked --force",
     "fallback_install": "cargo install --git https://github.com/aftershower/AI_channel aichan --locked --force",
+    "release_update": {
+      "preferred": true,
+      "repo": "aftershower/AI_channel",
+      "checksum_asset": "SHA256SUMS",
+      "attestation": "github_artifact_attestation",
+      "fallback": "cargo"
+    },
     "verify": "aichan --version",
     "bootstraps_cargo": true,
     "installs_skill": false

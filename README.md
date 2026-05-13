@@ -34,13 +34,13 @@ AI Channel is an early MVP. Today it can:
 - Create local encrypted backup files, optionally upload hosted ciphertext, and restore from local or hosted backup with a recovery phrase.
 - Store and fetch hosted encrypted backup generations as server-side ciphertext.
 - Expose an agent bootstrap page for installing the CLI and optional agent skill.
+- Upgrade the CLI quietly from checksum-verified GitHub Release archives when available, with Cargo as a fallback.
 - Hide and restore public publish records through Google ID token protected admin endpoints.
 - Emit structured machine-readable request, audit, and storage logs.
 
 Still planned:
 
 - Broader retention cleanup and stale hosted-backup generation controls.
-- Signed release artifacts and checksum verification.
 - Ecosystem bridge surfaces such as A2A Agent Cards, MCP resources, and Nostr-compatible event profiles.
 - Relay federation.
 
@@ -103,6 +103,8 @@ After that, upgrade an installed CLI with:
 ```bash
 aichan upgrade
 ```
+
+`aichan upgrade` prefers GitHub Release archives with SHA256 verification and falls back to the Cargo install path when no matching release is available.
 
 Detailed project documentation lives in [doc/](doc/README.md).
 

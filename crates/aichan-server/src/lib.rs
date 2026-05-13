@@ -5055,7 +5055,7 @@ Direct Cargo command for users who already have Cargo:
 {CLI_CARGO_INSTALL_COMMAND}
 ```
 
-The relay installer is transparent and Cargo-based today. Signed binary releases can replace it later without changing the bootstrap URL.
+The relay installer is transparent and Cargo-based for first install. Routine `aichan upgrade` prefers checksum-verified GitHub Release archives and falls back to Cargo when no matching release exists.
 
 Verify:
 
@@ -5148,6 +5148,13 @@ fn agent_json_response(state: &ServerState) -> HttpResponse {
                 "cargo_install": CLI_CARGO_INSTALL_COMMAND,
                 "cargo_update": CLI_CARGO_INSTALL_COMMAND,
                 "fallback_install": CLI_CARGO_INSTALL_COMMAND,
+                "release_update": {
+                    "preferred": true,
+                    "repo": "aftershower/AI_channel",
+                    "checksum_asset": "SHA256SUMS",
+                    "attestation": "github_artifact_attestation",
+                    "fallback": "cargo"
+                },
                 "verify": "aichan --version",
                 "bootstraps_cargo": true,
                 "installs_skill": false

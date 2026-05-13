@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
@@ -22,16 +24,20 @@ use aichan_core::{
 };
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 const PROJECT_REPO_URL: &str = "https://github.com/aftershower/AI_channel";
+const PROJECT_REPO_SLUG: &str = "aftershower/AI_channel";
+const GITHUB_API_BASE_URL: &str = "https://api.github.com";
 const DEFAULT_RELAY_CONNECT_TIMEOUT_SECS: u64 = 12;
 const DEFAULT_RELAY_REQUEST_TIMEOUT_SECS: u64 = 30;
 const MIN_RELAY_TIMEOUT_SECS: u64 = 1;
 const MAX_RELAY_TIMEOUT_SECS: u64 = 120;
+const UPGRADE_OUTPUT_TAIL_LINES: usize = 24;
 
 #[derive(Debug, Parser)]
 #[command(name = "aichan", version, about = "AI Channel local CLI")]
@@ -249,6 +255,10 @@ struct UpgradeArgs {
     #[arg(long, default_value = PROJECT_REPO_URL)]
     git: String,
 
+    /// Upgrade source. Auto tries GitHub releases first, then falls back to Cargo.
+    #[arg(long, value_enum, default_value_t = UpgradeSource::Auto)]
+    source: UpgradeSource,
+
     /// Install from a specific Git branch.
     #[arg(long, conflicts_with = "rev")]
     branch: Option<String>,
@@ -260,6 +270,17 @@ struct UpgradeArgs {
     /// Print the upgrade command without running it.
     #[arg(long)]
     dry_run: bool,
+
+    /// Show underlying Cargo output when the Cargo fallback runs.
+    #[arg(long)]
+    verbose: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum UpgradeSource {
+    Auto,
+    Release,
+    Cargo,
 }
 
 fn main() -> Result<()> {
@@ -442,7 +463,9 @@ fn print_status(state: &LocalStateDir, json: bool) -> Result<()> {
 }
 
 fn upgrade(args: UpgradeArgs, json: bool) -> Result<()> {
-    let command = upgrade_command_parts(&args);
+    let fallback_command = upgrade_command_parts(&args);
+    let release_plan =
+        should_try_release_upgrade(&args).then(|| release_upgrade_plan(env!("CARGO_PKG_VERSION")));
     if args.dry_run {
         if json {
             println!(
@@ -451,51 +474,146 @@ fn upgrade(args: UpgradeArgs, json: bool) -> Result<()> {
                     "upgraded": false,
                     "dry_run": true,
                     "current_version": env!("CARGO_PKG_VERSION"),
-                    "command": command,
+                    "strategy": upgrade_strategy_name(&args),
+                    "source": format!("{:?}", args.source).to_ascii_lowercase(),
+                    "release": release_plan,
+                    "fallback_command": fallback_command,
                 }))?
             );
         } else {
             println!("current_version: {}", env!("CARGO_PKG_VERSION"));
             println!("dry_run: true");
-            println!("command: {}", command.join(" "));
+            println!("strategy: {}", upgrade_strategy_name(&args));
+            if let Some(asset_name) = release_plan
+                .as_ref()
+                .and_then(|plan| plan.get("asset_name"))
+                .and_then(serde_json::Value::as_str)
+            {
+                println!("release_asset: {asset_name}");
+            }
+            println!("fallback_command: {}", fallback_command.join(" "));
         }
         return Ok(());
     }
 
+    let mut release_fallback_error = None;
+    if should_try_release_upgrade(&args) {
+        match upgrade_from_release() {
+            Ok(outcome) => {
+                print_release_upgrade_outcome(&outcome, json)?;
+                return Ok(());
+            }
+            Err(error) if args.source == UpgradeSource::Release => {
+                return Err(error.context("release upgrade failed"));
+            }
+            Err(error) => {
+                release_fallback_error = Some(error.to_string());
+            }
+        }
+    }
+
+    let cargo = run_cargo_upgrade(&fallback_command, args.verbose)?;
     if json {
-        let output = ProcessCommand::new(&command[0])
-            .args(&command[1..])
-            .output()
-            .context("run aichan upgrade command")?;
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "upgraded": output.status.success(),
+                "upgraded": cargo.success,
                 "dry_run": false,
                 "current_version": env!("CARGO_PKG_VERSION"),
-                "command": command,
-                "status_code": output.status.code(),
-                "stdout": String::from_utf8_lossy(&output.stdout),
-                "stderr": String::from_utf8_lossy(&output.stderr),
+                "source": "cargo",
+                "fallback_reason": release_fallback_error,
+                "command": fallback_command,
+                "status_code": cargo.status_code,
+                "stdout_tail": cargo.stdout_tail,
+                "stderr_tail": cargo.stderr_tail,
             }))?
         );
-        if !output.status.success() {
-            return Err(anyhow!("aichan upgrade failed"));
+    } else {
+        println!("current_version: {}", env!("CARGO_PKG_VERSION"));
+        if let Some(reason) = release_fallback_error {
+            println!("release: unavailable ({reason})");
         }
-        return Ok(());
+        println!("source: cargo");
+        println!("aichan upgrade completed");
+    }
+    Ok(())
+}
+
+fn upgrade_strategy_name(args: &UpgradeArgs) -> &'static str {
+    match args.source {
+        UpgradeSource::Auto if should_try_release_upgrade(args) => "release_then_cargo",
+        UpgradeSource::Auto => "cargo",
+        UpgradeSource::Release => "release",
+        UpgradeSource::Cargo => "cargo",
+    }
+}
+
+fn should_try_release_upgrade(args: &UpgradeArgs) -> bool {
+    matches!(args.source, UpgradeSource::Auto | UpgradeSource::Release)
+        && args.git == PROJECT_REPO_URL
+        && args.branch.is_none()
+        && args.rev.is_none()
+}
+
+fn release_upgrade_plan(current_version: &str) -> serde_json::Value {
+    serde_json::json!({
+        "repo": PROJECT_REPO_SLUG,
+        "latest_api_url": latest_release_api_url(),
+        "asset_name": current_platform_release_asset_name(current_version),
+        "checksum_asset": "SHA256SUMS",
+        "attestation": "GitHub artifact attestation from .github/workflows/release.yml",
+    })
+}
+
+#[derive(Debug, Clone)]
+struct CargoUpgradeOutcome {
+    success: bool,
+    status_code: Option<i32>,
+    stdout_tail: String,
+    stderr_tail: String,
+}
+
+fn run_cargo_upgrade(command: &[String], verbose: bool) -> Result<CargoUpgradeOutcome> {
+    if verbose {
+        let status = ProcessCommand::new(&command[0])
+            .args(&command[1..])
+            .status()
+            .context("run aichan upgrade command")?;
+        if !status.success() {
+            return Err(anyhow!("aichan upgrade failed with status {status}"));
+        }
+        return Ok(CargoUpgradeOutcome {
+            success: true,
+            status_code: status.code(),
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+        });
     }
 
-    println!("current_version: {}", env!("CARGO_PKG_VERSION"));
-    println!("running: {}", command.join(" "));
-    let status = ProcessCommand::new(&command[0])
+    let output = ProcessCommand::new(&command[0])
         .args(&command[1..])
-        .status()
+        .output()
         .context("run aichan upgrade command")?;
-    if !status.success() {
-        return Err(anyhow!("aichan upgrade failed with status {status}"));
+    let stdout_tail = text_tail(&output.stdout, UPGRADE_OUTPUT_TAIL_LINES);
+    let stderr_tail = text_tail(&output.stderr, UPGRADE_OUTPUT_TAIL_LINES);
+    if !output.status.success() {
+        if !stdout_tail.trim().is_empty() {
+            eprintln!("{stdout_tail}");
+        }
+        if !stderr_tail.trim().is_empty() {
+            eprintln!("{stderr_tail}");
+        }
+        return Err(anyhow!(
+            "aichan upgrade failed with status {}",
+            output.status
+        ));
     }
-    println!("aichan upgrade completed");
-    Ok(())
+    Ok(CargoUpgradeOutcome {
+        success: true,
+        status_code: output.status.code(),
+        stdout_tail,
+        stderr_tail,
+    })
 }
 
 fn upgrade_command_parts(args: &UpgradeArgs) -> Vec<String> {
@@ -519,6 +637,294 @@ fn upgrade_command_parts(args: &UpgradeArgs) -> Vec<String> {
         "--force".to_string(),
     ]);
     command
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    assets: Vec<GitHubReleaseAsset>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GitHubReleaseAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+#[derive(Debug, Clone)]
+struct ReleaseUpgradeOutcome {
+    upgraded: bool,
+    source: &'static str,
+    current_version: String,
+    latest_version: String,
+    asset_name: Option<String>,
+    checksum: Option<String>,
+    installed_path: Option<PathBuf>,
+    message: String,
+}
+
+fn upgrade_from_release() -> Result<ReleaseUpgradeOutcome> {
+    let release = fetch_latest_release()?;
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let latest_version = release.tag_name.trim_start_matches('v').to_string();
+    if release_version_order(&release.tag_name, &current_version) != Some(Ordering::Greater) {
+        return Ok(ReleaseUpgradeOutcome {
+            upgraded: false,
+            source: "release",
+            current_version,
+            latest_version,
+            asset_name: None,
+            checksum: None,
+            installed_path: None,
+            message: "aichan is already up to date".to_string(),
+        });
+    }
+
+    let asset_name = current_platform_release_asset_name(&latest_version)
+        .ok_or_else(|| anyhow!("release upgrade is not supported on this platform yet"))?;
+    let archive_asset = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == asset_name)
+        .ok_or_else(|| anyhow!("latest release does not include {asset_name}"))?;
+    let checksum_asset = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == "SHA256SUMS")
+        .ok_or_else(|| anyhow!("latest release does not include SHA256SUMS"))?;
+
+    let archive_bytes = github_get_bytes(
+        &archive_asset.browser_download_url,
+        &format!("download release asset {asset_name}"),
+    )?;
+    let sums_bytes = github_get_bytes(
+        &checksum_asset.browser_download_url,
+        "download release SHA256SUMS",
+    )?;
+    let sums_text = String::from_utf8(sums_bytes).context("release SHA256SUMS is not UTF-8")?;
+    let expected_checksum = checksum_from_sha256sums(&sums_text, &asset_name)
+        .ok_or_else(|| anyhow!("SHA256SUMS does not contain {asset_name}"))?;
+    let actual_checksum = sha256_hex(&archive_bytes);
+    if actual_checksum != expected_checksum {
+        return Err(anyhow!(
+            "checksum mismatch for {asset_name}: expected {expected_checksum}, got {actual_checksum}"
+        ));
+    }
+
+    let temp_dir = create_upgrade_temp_dir()?;
+    let archive_path = temp_dir.join(&asset_name);
+    fs::write(&archive_path, &archive_bytes)
+        .with_context(|| format!("write {}", archive_path.display()))?;
+    extract_release_archive(&archive_path, &temp_dir)?;
+    let extracted_binary = temp_dir.join("aichan");
+    if !extracted_binary.exists() {
+        return Err(anyhow!(
+            "release archive did not contain an aichan binary at {}",
+            extracted_binary.display()
+        ));
+    }
+    let installed_path = install_release_binary(&extracted_binary)?;
+    let _ = fs::remove_dir_all(&temp_dir);
+
+    Ok(ReleaseUpgradeOutcome {
+        upgraded: true,
+        source: "release",
+        current_version,
+        latest_version,
+        asset_name: Some(asset_name),
+        checksum: Some(actual_checksum),
+        installed_path: Some(installed_path),
+        message: "aichan upgrade completed".to_string(),
+    })
+}
+
+fn print_release_upgrade_outcome(outcome: &ReleaseUpgradeOutcome, json: bool) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "upgraded": outcome.upgraded,
+                "dry_run": false,
+                "source": outcome.source,
+                "current_version": outcome.current_version,
+                "latest_version": outcome.latest_version,
+                "asset_name": outcome.asset_name,
+                "checksum_sha256": outcome.checksum,
+                "installed_path": outcome.installed_path.as_ref().map(|path| path.display().to_string()),
+                "message": outcome.message,
+            }))?
+        );
+    } else {
+        println!("current_version: {}", outcome.current_version);
+        println!("latest_version: {}", outcome.latest_version);
+        println!("source: {}", outcome.source);
+        if let Some(asset_name) = &outcome.asset_name {
+            println!("asset: {asset_name}");
+        }
+        if outcome.checksum.is_some() {
+            println!("checksum: verified");
+        }
+        if let Some(path) = &outcome.installed_path {
+            println!("installed: {}", path.display());
+        }
+        println!("{}", outcome.message);
+    }
+    Ok(())
+}
+
+fn fetch_latest_release() -> Result<GitHubRelease> {
+    let bytes = github_get_bytes(&latest_release_api_url(), "fetch latest GitHub release")?;
+    serde_json::from_slice(&bytes).context("parse latest GitHub release")
+}
+
+fn latest_release_api_url() -> String {
+    format!("{GITHUB_API_BASE_URL}/repos/{PROJECT_REPO_SLUG}/releases/latest")
+}
+
+fn github_get_bytes(url: &str, description: &str) -> Result<Vec<u8>> {
+    let response = relay_http_client()?
+        .get(url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .with_context(|| format!("{description}: {url}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(anyhow!("{description} returned HTTP {status}"));
+    }
+    Ok(response
+        .bytes()
+        .with_context(|| format!("read {description}: {url}"))?
+        .to_vec())
+}
+
+fn current_platform_release_asset_name(version: &str) -> Option<String> {
+    release_asset_name_for(version, std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn release_asset_name_for(version: &str, os: &str, arch: &str) -> Option<String> {
+    let target = match (os, arch) {
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        ("macos", "x86_64") => "x86_64-apple-darwin",
+        ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
+        _ => return None,
+    };
+    Some(format!("aichan-{version}-{target}.tar.gz"))
+}
+
+fn release_version_order(release_tag: &str, current_version: &str) -> Option<Ordering> {
+    let release = parse_release_version(release_tag)?;
+    let current = parse_release_version(current_version)?;
+    Some(release.cmp(&current))
+}
+
+fn parse_release_version(version: &str) -> Option<(u64, u64, u64)> {
+    let clean = version.trim().trim_start_matches('v');
+    let mut parts = clean.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
+fn checksum_from_sha256sums(sums: &str, asset_name: &str) -> Option<String> {
+    sums.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        let checksum = parts.next()?;
+        let name = parts.next()?.trim_start_matches('*');
+        if name == asset_name
+            && checksum.len() == 64
+            && checksum.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            Some(checksum.to_ascii_lowercase())
+        } else {
+            None
+        }
+    })
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn create_upgrade_temp_dir() -> Result<PathBuf> {
+    let path = std::env::temp_dir().join(format!(
+        "aichan-upgrade-{}-{}",
+        std::process::id(),
+        Uuid::new_v4().simple()
+    ));
+    fs::create_dir_all(&path).with_context(|| format!("create {}", path.display()))?;
+    Ok(path)
+}
+
+fn extract_release_archive(archive_path: &Path, destination: &Path) -> Result<()> {
+    let output = ProcessCommand::new("tar")
+        .arg("-xzf")
+        .arg(archive_path)
+        .arg("-C")
+        .arg(destination)
+        .output()
+        .context("extract release archive with tar")?;
+    if !output.status.success() {
+        let stderr_tail = text_tail(&output.stderr, UPGRADE_OUTPUT_TAIL_LINES);
+        return Err(anyhow!(
+            "extract release archive failed with status {}: {}",
+            output.status,
+            stderr_tail.trim()
+        ));
+    }
+    Ok(())
+}
+
+fn install_release_binary(extracted_binary: &Path) -> Result<PathBuf> {
+    let current_exe = std::env::current_exe().context("locate current aichan executable")?;
+    let install_tmp = current_exe.with_file_name(format!(
+        ".aichan-upgrade-{}-{}",
+        std::process::id(),
+        Uuid::new_v4().simple()
+    ));
+    fs::copy(extracted_binary, &install_tmp).with_context(|| {
+        format!(
+            "copy release binary from {} to {}",
+            extracted_binary.display(),
+            install_tmp.display()
+        )
+    })?;
+    mark_executable(&install_tmp)?;
+    fs::rename(&install_tmp, &current_exe).with_context(|| {
+        format!(
+            "replace {} with verified release binary",
+            current_exe.display()
+        )
+    })?;
+    Ok(current_exe)
+}
+
+#[cfg(unix)]
+fn mark_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(path)
+        .with_context(|| format!("stat {}", path.display()))?
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions)
+        .with_context(|| format!("chmod executable {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn mark_executable(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn text_tail(bytes: &[u8], max_lines: usize) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let lines = text.lines().collect::<Vec<_>>();
+    let start = lines.len().saturating_sub(max_lines);
+    lines[start..].join("\n")
 }
 
 fn publish(state: &LocalStateDir, args: PublishArgs, json: bool) -> Result<()> {
@@ -1768,5 +2174,48 @@ mod tests {
 
         assert!(timeouts.connect_timeout >= Duration::from_secs(10));
         assert!(timeouts.request_timeout >= Duration::from_secs(20));
+    }
+
+    #[test]
+    fn release_version_comparison_treats_patch_numbers_numerically() {
+        assert_eq!(
+            release_version_order("v0.3.10", "0.3.9"),
+            Some(std::cmp::Ordering::Greater)
+        );
+        assert_eq!(
+            release_version_order("v0.3.2", "0.3.10"),
+            Some(std::cmp::Ordering::Less)
+        );
+        assert_eq!(
+            release_version_order("v0.3.2", "0.3.2"),
+            Some(std::cmp::Ordering::Equal)
+        );
+    }
+
+    #[test]
+    fn release_asset_name_matches_supported_platforms() {
+        assert_eq!(
+            release_asset_name_for("0.3.3", "macos", "aarch64"),
+            Some("aichan-0.3.3-aarch64-apple-darwin.tar.gz".to_string())
+        );
+        assert_eq!(
+            release_asset_name_for("0.3.3", "linux", "x86_64"),
+            Some("aichan-0.3.3-x86_64-unknown-linux-gnu.tar.gz".to_string())
+        );
+        assert_eq!(release_asset_name_for("0.3.3", "windows", "x86_64"), None);
+    }
+
+    #[test]
+    fn sha256sums_parser_selects_exact_asset_name() {
+        let sums = "\
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  aichan-0.3.3-x86_64-unknown-linux-gnu.tar.gz
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  aichan-0.3.3-aarch64-apple-darwin.tar.gz
+";
+
+        assert_eq!(
+            checksum_from_sha256sums(sums, "aichan-0.3.3-aarch64-apple-darwin.tar.gz"),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string())
+        );
+        assert_eq!(checksum_from_sha256sums(sums, "missing.tar.gz"), None);
     }
 }
