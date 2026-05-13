@@ -139,6 +139,7 @@ jobs:
           env_vars: |-
             AICHAN_PUBLISH_STORE=firestore
             AICHAN_MESSAGE_STORE=firestore
+            AICHAN_ACTIVITY_STORE=firestore
             AICHAN_BACKUP_STORE=firestore
             AICHAN_FIRESTORE_PROJECT_ID=${{ env.PROJECT_ID }}
             AICHAN_FIRESTORE_DATABASE=(default)

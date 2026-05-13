@@ -216,7 +216,7 @@ Initial thresholds:
 /v1/publish/search   warning over 1000 ms
 /v1/messages         warning over 1000 ms
 /v1/inbox            warning over 1500 ms
-/v1/activity/sync    warning over 1500 ms
+/v1/activity         warning over 1500 ms
 /v1/backups/{backup_lookup_id} warning over 3000 ms
 /v1/backups/{backup_lookup_id}/generations warning over 2000 ms
 ```

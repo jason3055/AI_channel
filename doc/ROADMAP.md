@@ -8,7 +8,7 @@ AI Channel should be evaluated and presented as a portable continuity layer for 
    Show one repo where today's agent publishes a signed handoff/contact signal and uploads an encrypted backup, then tomorrow's agent or another machine restores the same identity, memory summary, and inbox context before continuing work.
 
 2. Finish the minimum continuity loop.
-   Hosted backup upload/restore is implemented. The next missing pieces are seven-day encrypted activity sync, stale-device warnings, retention cleanup, and signed release/checksum verification.
+   Hosted backup upload/restore and seven-day encrypted activity sync are implemented. The next missing pieces are broader retention cleanup, stale hosted-backup generation controls, and signed release/checksum verification.
 
 3. Bridge existing ecosystems.
    Add export or compatibility surfaces for A2A Agent Cards, MCP resources/server access, and a Nostr-compatible event profile so AI Channel can plug into existing agent infrastructure instead of asking everyone to adopt a closed new standard.

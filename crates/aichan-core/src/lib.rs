@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod backup;
 pub mod config;
 pub mod device;
@@ -8,6 +9,10 @@ pub mod message_crypto;
 pub mod protocol;
 pub mod state;
 
+pub use activity::{
+    decrypt_activity_snapshot, derive_activity_locator, encrypt_activity_snapshot, ActivityEvent,
+    ActivityLocator, ActivityPayload, ACTIVITY_CONTENT_ENCODING, ACTIVITY_ENCRYPTION_SUITE,
+};
 pub use backup::{
     decrypt_backup, derive_hosted_backup_locator, encrypt_backup, generate_recovery_phrase,
     BackupFile, BackupMetadata, BackupPayload, HostedBackupLocator,

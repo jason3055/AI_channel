@@ -649,7 +649,7 @@ fn agent_bootstrap_explains_skill_cli_and_installer() {
         "Portable continuity layer for coding agents"
     );
     assert_eq!(metadata_json["skill"]["name"], "aichan");
-    assert_eq!(metadata_json["skill"]["version"], "0.3.0");
+    assert_eq!(metadata_json["skill"]["version"], "0.3.1");
     assert!(metadata_json["skill"]["install"]
         .as_str()
         .unwrap()
@@ -873,4 +873,132 @@ fn hosted_backup_rejects_plaintext_private_material() {
 
     assert_eq!(response.status, 400);
     assert!(response.body_text().contains("invalid_backup_package"));
+}
+
+#[test]
+fn activity_events_are_ciphertext_only_with_auth_and_cursor_pages() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let state = ServerState::new(data_dir.path()).unwrap();
+    let now = Utc::now();
+    let first = json!({
+        "version": 1,
+        "event_id": "act_test_001",
+        "source_device_id": "device_test_source",
+        "created_at": now.to_rfc3339(),
+        "expires_at": (now + chrono::Duration::seconds(604800)).to_rfc3339(),
+        "content_encoding": "application/aichan+json; version=1",
+        "encryption": {
+            "suite": "aichan.activity.chacha20poly1305.hkdf-sha256.v1",
+            "kdf": "hkdf-sha256",
+            "salt": "salt_test_001",
+            "nonce": "nonce_test_001"
+        },
+        "ciphertext": "ciphertext_memory_snapshot_001"
+    });
+    let second = json!({
+        "version": 1,
+        "event_id": "act_test_002",
+        "source_device_id": "device_test_source",
+        "created_at": (now + chrono::Duration::seconds(1)).to_rfc3339(),
+        "expires_at": (now + chrono::Duration::seconds(604800)).to_rfc3339(),
+        "content_encoding": "application/aichan+json; version=1",
+        "encryption": {
+            "suite": "aichan.activity.chacha20poly1305.hkdf-sha256.v1",
+            "kdf": "hkdf-sha256",
+            "salt": "salt_test_002",
+            "nonce": "nonce_test_002"
+        },
+        "ciphertext": "ciphertext_memory_snapshot_002"
+    });
+
+    for event in [&first, &second] {
+        let response = handle_request(
+            &state,
+            HttpRequest::new("POST", "/v1/activity")
+                .with_header("Aichan-Activity-Bucket", "sync_bucket_test_001")
+                .with_header("Aichan-Activity-Auth", "activity-auth-secret")
+                .with_json_body(serde_json::to_vec(event).unwrap()),
+        );
+        assert_eq!(response.status, 201);
+    }
+
+    let first_page = handle_request(
+        &state,
+        HttpRequest::new("GET", "/v1/activity?bucket=sync_bucket_test_001&limit=1")
+            .with_header("Aichan-Activity-Auth", "activity-auth-secret"),
+    );
+    assert_eq!(first_page.status, 200);
+    let first_page_json: serde_json::Value = serde_json::from_slice(&first_page.body).unwrap();
+    assert_eq!(first_page_json["count"], 1);
+    assert_eq!(first_page_json["events"][0]["event_id"], "act_test_001");
+    assert!(first_page_json["next_cursor"].as_str().is_some());
+
+    let cursor = first_page_json["next_cursor"].as_str().unwrap();
+    let second_page = handle_request(
+        &state,
+        HttpRequest::new(
+            "GET",
+            format!("/v1/activity?bucket=sync_bucket_test_001&limit=10&cursor={cursor}"),
+        )
+        .with_header("Aichan-Activity-Auth", "activity-auth-secret"),
+    );
+    assert_eq!(second_page.status, 200);
+    let second_page_json: serde_json::Value = serde_json::from_slice(&second_page.body).unwrap();
+    assert_eq!(second_page_json["count"], 1);
+    assert_eq!(second_page_json["events"][0]["event_id"], "act_test_002");
+    assert!(second_page_json["next_cursor"].is_null());
+
+    let store_text = std::fs::read_to_string(data_dir.path().join("activity_events.json"))
+        .expect("activity event store should be written");
+    assert!(store_text.contains("ciphertext_memory_snapshot_001"));
+    assert!(!store_text.contains("activity-auth-secret"));
+    assert!(!store_text.contains("nickname"));
+
+    let wrong_auth = handle_request(
+        &state,
+        HttpRequest::new("GET", "/v1/activity?bucket=sync_bucket_test_001")
+            .with_header("Aichan-Activity-Auth", "wrong-auth-secret"),
+    );
+    assert_eq!(wrong_auth.status, 401);
+}
+
+#[test]
+fn activity_events_filter_expired_entries_before_returning() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let state = ServerState::new(data_dir.path()).unwrap();
+    let now = Utc::now();
+    let expired = json!({
+        "version": 1,
+        "event_id": "act_test_expired",
+        "source_device_id": "device_test_source",
+        "created_at": (now - chrono::Duration::seconds(604799)).to_rfc3339(),
+        "expires_at": (now - chrono::Duration::seconds(1)).to_rfc3339(),
+        "content_encoding": "application/aichan+json; version=1",
+        "encryption": {
+            "suite": "aichan.activity.chacha20poly1305.hkdf-sha256.v1",
+            "kdf": "hkdf-sha256",
+            "salt": "salt_test_expired",
+            "nonce": "nonce_test_expired"
+        },
+        "ciphertext": "ciphertext_expired"
+    });
+
+    let upload = handle_request(
+        &state,
+        HttpRequest::new("POST", "/v1/activity")
+            .with_header("Aichan-Activity-Bucket", "sync_bucket_test_002")
+            .with_header("Aichan-Activity-Auth", "activity-auth-secret")
+            .with_json_body(serde_json::to_vec(&expired).unwrap()),
+    );
+    assert_eq!(upload.status, 201);
+
+    let list = handle_request(
+        &state,
+        HttpRequest::new("GET", "/v1/activity?bucket=sync_bucket_test_002")
+            .with_header("Aichan-Activity-Auth", "activity-auth-secret"),
+    );
+    assert_eq!(list.status, 200);
+    let list_json: serde_json::Value = serde_json::from_slice(&list.body).unwrap();
+    assert_eq!(list_json["count"], 0);
+    assert_eq!(list_json["events"].as_array().unwrap().len(), 0);
 }

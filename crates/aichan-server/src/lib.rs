@@ -12,6 +12,7 @@ use aichan_core::protocol::{
     canonical_json_bytes, AichanRequestSignature, MessageEnvelopePayload, PublishRecordPayload,
     RequestToSign, SignedProtocolObject, PROTOCOL_ID,
 };
+use aichan_core::ActivityEvent;
 use anyhow::{Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -28,8 +29,16 @@ pub struct ServerState {
     publish_store: Arc<PublishStore>,
     message_store: Arc<MessageStore>,
     backup_store: Arc<BackupStore>,
+    activity_store: Arc<ActivityStore>,
     request_auth: Arc<RequestAuthTracker>,
     admin_auth: Arc<AdminAuth>,
+}
+
+struct ServerStores {
+    publish: Arc<PublishStore>,
+    message: Arc<MessageStore>,
+    backup: Arc<BackupStore>,
+    activity: Arc<ActivityStore>,
 }
 
 impl ServerState {
@@ -75,13 +84,14 @@ impl ServerState {
         max_connections: usize,
     ) -> Result<Self> {
         let data_dir = data_dir.as_ref();
-        let publish_store = Arc::new(PublishStore::file(data_dir)?);
-        let message_store = Arc::new(MessageStore::file(data_dir)?);
-        let backup_store = Arc::new(BackupStore::file(data_dir)?);
+        let stores = ServerStores {
+            publish: Arc::new(PublishStore::file(data_dir)?),
+            message: Arc::new(MessageStore::file(data_dir)?),
+            backup: Arc::new(BackupStore::file(data_dir)?),
+            activity: Arc::new(ActivityStore::file(data_dir)?),
+        };
         Self::with_stores(
-            publish_store,
-            message_store,
-            backup_store,
+            stores,
             public_base_url,
             rate_limits,
             max_connections,
@@ -95,13 +105,14 @@ impl ServerState {
         principal: impl Into<String>,
     ) -> Result<Self> {
         let data_dir = data_dir.as_ref();
-        let publish_store = Arc::new(PublishStore::file(data_dir)?);
-        let message_store = Arc::new(MessageStore::file(data_dir)?);
-        let backup_store = Arc::new(BackupStore::file(data_dir)?);
+        let stores = ServerStores {
+            publish: Arc::new(PublishStore::file(data_dir)?),
+            message: Arc::new(MessageStore::file(data_dir)?),
+            backup: Arc::new(BackupStore::file(data_dir)?),
+            activity: Arc::new(ActivityStore::file(data_dir)?),
+        };
         Self::with_stores(
-            publish_store,
-            message_store,
-            backup_store,
+            stores,
             "http://localhost:8080",
             RateLimitConfig::default(),
             DEFAULT_MAX_CONNECTIONS,
@@ -116,14 +127,15 @@ impl ServerState {
         max_connections: usize,
     ) -> Result<Self> {
         let data_dir = data_dir.as_ref();
-        let publish_store = Arc::new(publish_store_from_env(data_dir)?);
-        let message_store = Arc::new(message_store_from_env(data_dir)?);
-        let backup_store = Arc::new(backup_store_from_env(data_dir)?);
+        let stores = ServerStores {
+            publish: Arc::new(publish_store_from_env(data_dir)?),
+            message: Arc::new(message_store_from_env(data_dir)?),
+            backup: Arc::new(backup_store_from_env(data_dir)?),
+            activity: Arc::new(activity_store_from_env(data_dir)?),
+        };
         let admin_auth = Arc::new(AdminAuth::from_env()?);
         Self::with_stores(
-            publish_store,
-            message_store,
-            backup_store,
+            stores,
             public_base_url,
             rate_limits,
             max_connections,
@@ -132,9 +144,7 @@ impl ServerState {
     }
 
     fn with_stores(
-        publish_store: Arc<PublishStore>,
-        message_store: Arc<MessageStore>,
-        backup_store: Arc<BackupStore>,
+        stores: ServerStores,
         public_base_url: impl Into<String>,
         rate_limits: RateLimitConfig,
         max_connections: usize,
@@ -144,9 +154,10 @@ impl ServerState {
             public_base_url: Arc::new(public_base_url.into()),
             rate_limiter: Arc::new(RateLimiter::new(rate_limits)),
             connection_limiter: Arc::new(ConnectionLimiter::new(max_connections.max(1))),
-            publish_store,
-            message_store,
-            backup_store,
+            publish_store: stores.publish,
+            message_store: stores.message,
+            backup_store: stores.backup,
+            activity_store: stores.activity,
             request_auth: Arc::new(RequestAuthTracker::default()),
             admin_auth,
         })
@@ -560,6 +571,11 @@ const MAX_MESSAGE_CIPHERTEXT_BYTES: usize = 65_536;
 const MAX_BACKUP_GENERATIONS: usize = 10;
 const MAX_BACKUP_CIPHERTEXT_CHARS: usize = 65_536;
 const MAX_BACKUP_LOOKUP_ID_BYTES: usize = 96;
+const ACTIVITY_DEFAULT_LIMIT: usize = 100;
+const ACTIVITY_MAX_LIMIT: usize = 500;
+const MAX_ACTIVITY_EVENTS: usize = 2_000;
+const MAX_ACTIVITY_CIPHERTEXT_CHARS: usize = 65_536;
+const MAX_ACTIVITY_BUCKET_ID_BYTES: usize = 96;
 const PROJECT_REPO_URL: &str = "https://github.com/aftershower/AI_channel";
 const PRODUCT_POSITIONING: &str = "Portable continuity layer for coding agents";
 const SKILL_INSTALL_COMMAND: &str =
@@ -1300,6 +1316,10 @@ fn backup_generation_id(created_at: DateTime<Utc>, bytes: &[u8]) -> String {
     format!("gen_{}_{}", created_at.timestamp_millis(), digest_prefix)
 }
 
+fn activity_auth_hash(auth_token: &str) -> String {
+    format!("sha256:{}", sha256_hex(auth_token.as_bytes()))
+}
+
 fn compare_backup_generations_oldest_first(
     left: &StoredHostedBackupGeneration,
     right: &StoredHostedBackupGeneration,
@@ -1314,6 +1334,21 @@ fn compare_backup_generations_newest_first(
     right: &StoredHostedBackupGeneration,
 ) -> Ordering {
     compare_backup_generations_oldest_first(right, left)
+}
+
+fn compare_activity_events_oldest_first(
+    left: &StoredActivityEvent,
+    right: &StoredActivityEvent,
+) -> Ordering {
+    left.event
+        .created_at
+        .cmp(&right.event.created_at)
+        .then_with(|| left.event.event_id.cmp(&right.event.event_id))
+}
+
+fn activity_event_is_after_cursor(entry: &StoredActivityEvent, cursor: &ActivityCursor) -> bool {
+    entry.event.created_at > cursor.created_at
+        || (entry.event.created_at == cursor.created_at && entry.event.event_id > cursor.event_id)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1407,6 +1442,279 @@ impl FileBackupStore {
 
     fn save(&self, buckets: &[StoredHostedBackupBucket]) -> Result<()> {
         let temp_path = self.path.with_file_name("hosted_backups.json.tmp");
+        let bytes = serde_json::to_vec_pretty(buckets)?;
+        std::fs::write(&temp_path, bytes)
+            .with_context(|| format!("write {}", temp_path.display()))?;
+        std::fs::rename(&temp_path, &self.path)
+            .with_context(|| format!("rename {} to {}", temp_path.display(), self.path.display()))
+    }
+}
+
+enum ActivityStore {
+    File(FileActivityStore),
+    Firestore(FirestoreActivityStore),
+}
+
+impl ActivityStore {
+    fn file(data_dir: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self::File(FileActivityStore::new(data_dir)?))
+    }
+
+    fn put(
+        &self,
+        bucket_id: &str,
+        auth_token: &str,
+        event: ActivityEvent,
+    ) -> Result<ActivityPutStatus> {
+        match self {
+            Self::File(store) => store.put(bucket_id, auth_token, event),
+            Self::Firestore(store) => store.put(bucket_id, auth_token, event),
+        }
+    }
+
+    fn list(
+        &self,
+        bucket_id: &str,
+        auth_token: &str,
+        limit: usize,
+        cursor: Option<&ActivityCursor>,
+        now: DateTime<Utc>,
+    ) -> Result<ActivityListStatus> {
+        match self {
+            Self::File(store) => store.list(bucket_id, auth_token, limit, cursor, now),
+            Self::Firestore(store) => store.list(bucket_id, auth_token, limit, cursor, now),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct StoredActivityBucket {
+    bucket_id: String,
+    auth_hash: String,
+    events: Vec<StoredActivityEvent>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl StoredActivityBucket {
+    fn new(bucket_id: &str, auth_hash: String, now: DateTime<Utc>) -> Self {
+        Self {
+            bucket_id: bucket_id.to_string(),
+            auth_hash,
+            events: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn authorize(&self, auth_token: &str) -> bool {
+        self.auth_hash == activity_auth_hash(auth_token)
+    }
+
+    fn put(
+        &mut self,
+        auth_token: &str,
+        event: ActivityEvent,
+        now: DateTime<Utc>,
+    ) -> ActivityPutStatus {
+        if !self.authorize(auth_token) {
+            return ActivityPutStatus::Unauthorized;
+        }
+        self.prune_expired(now);
+        if let Some(existing) = self
+            .events
+            .iter()
+            .find(|entry| entry.event.event_id == event.event_id)
+            .cloned()
+        {
+            return ActivityPutStatus::Stored(Box::new(existing));
+        }
+
+        let bytes = serde_json::to_vec(&event).expect("activity event JSON is serializable");
+        let stored = StoredActivityEvent {
+            event,
+            stored_at: now,
+            size_bytes: bytes.len(),
+            content_sha256: format!("sha256:{}", sha256_hex(&bytes)),
+        };
+        self.events.push(stored.clone());
+        self.updated_at = now;
+        self.events.sort_by(compare_activity_events_oldest_first);
+        if self.events.len() > MAX_ACTIVITY_EVENTS {
+            let remove_count = self.events.len() - MAX_ACTIVITY_EVENTS;
+            self.events.drain(0..remove_count);
+        }
+
+        ActivityPutStatus::Stored(Box::new(stored))
+    }
+
+    fn list(
+        &mut self,
+        auth_token: &str,
+        limit: usize,
+        cursor: Option<&ActivityCursor>,
+        now: DateTime<Utc>,
+    ) -> ActivityListStatus {
+        if !self.authorize(auth_token) {
+            return ActivityListStatus::Unauthorized;
+        }
+        self.prune_expired(now);
+        self.events.sort_by(compare_activity_events_oldest_first);
+        let start_index = cursor
+            .and_then(|cursor| {
+                self.events
+                    .iter()
+                    .position(|entry| activity_event_is_after_cursor(entry, cursor))
+            })
+            .unwrap_or_else(|| {
+                if cursor.is_some() {
+                    self.events.len()
+                } else {
+                    0
+                }
+            });
+        let mut candidates = self
+            .events
+            .iter()
+            .skip(start_index)
+            .take(limit.saturating_add(1))
+            .cloned()
+            .collect::<Vec<_>>();
+        let has_more = candidates.len() > limit;
+        if has_more {
+            candidates.truncate(limit);
+        }
+        let next_cursor = if has_more {
+            candidates
+                .last()
+                .map(|last| ActivityCursor {
+                    created_at: last.event.created_at,
+                    event_id: last.event.event_id.clone(),
+                })
+                .and_then(|cursor| cursor.encode().ok())
+        } else {
+            None
+        };
+
+        ActivityListStatus::Found(ActivityPage {
+            events: candidates,
+            next_cursor,
+            has_more,
+        })
+    }
+
+    fn prune_expired(&mut self, now: DateTime<Utc>) {
+        self.events.retain(|entry| entry.event.expires_at > now);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct StoredActivityEvent {
+    event: ActivityEvent,
+    stored_at: DateTime<Utc>,
+    size_bytes: usize,
+    content_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ActivityPutStatus {
+    Stored(Box<StoredActivityEvent>),
+    Unauthorized,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ActivityListStatus {
+    Found(ActivityPage),
+    NotFound,
+    Unauthorized,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActivityPage {
+    events: Vec<StoredActivityEvent>,
+    next_cursor: Option<String>,
+    has_more: bool,
+}
+
+struct FileActivityStore {
+    path: PathBuf,
+    lock: Mutex<()>,
+}
+
+impl FileActivityStore {
+    fn new(data_dir: impl AsRef<Path>) -> Result<Self> {
+        let data_dir = data_dir.as_ref();
+        std::fs::create_dir_all(data_dir)
+            .with_context(|| format!("create data dir {}", data_dir.display()))?;
+        Ok(Self {
+            path: data_dir.join("activity_events.json"),
+            lock: Mutex::new(()),
+        })
+    }
+
+    fn put(
+        &self,
+        bucket_id: &str,
+        auth_token: &str,
+        event: ActivityEvent,
+    ) -> Result<ActivityPutStatus> {
+        let _guard = self.lock.lock().expect("activity store mutex poisoned");
+        let mut buckets = self.load()?;
+        let auth_hash = activity_auth_hash(auth_token);
+        let now = Utc::now();
+        let status = match buckets
+            .iter_mut()
+            .find(|bucket| bucket.bucket_id == bucket_id)
+        {
+            Some(bucket) => bucket.put(auth_token, event, now),
+            None => {
+                let mut bucket = StoredActivityBucket::new(bucket_id, auth_hash, now);
+                let status = bucket.put(auth_token, event, now);
+                buckets.push(bucket);
+                status
+            }
+        };
+        if matches!(status, ActivityPutStatus::Stored(_)) {
+            self.save(&buckets)?;
+        }
+        Ok(status)
+    }
+
+    fn list(
+        &self,
+        bucket_id: &str,
+        auth_token: &str,
+        limit: usize,
+        cursor: Option<&ActivityCursor>,
+        now: DateTime<Utc>,
+    ) -> Result<ActivityListStatus> {
+        let _guard = self.lock.lock().expect("activity store mutex poisoned");
+        let mut buckets = self.load()?;
+        let Some(bucket) = buckets
+            .iter_mut()
+            .find(|bucket| bucket.bucket_id == bucket_id)
+        else {
+            return Ok(ActivityListStatus::NotFound);
+        };
+        let before = bucket.events.len();
+        let status = bucket.list(auth_token, limit, cursor, now);
+        if before != bucket.events.len() {
+            self.save(&buckets)?;
+        }
+        Ok(status)
+    }
+
+    fn load(&self) -> Result<Vec<StoredActivityBucket>> {
+        if !self.path.exists() {
+            return Ok(Vec::new());
+        }
+        let bytes =
+            std::fs::read(&self.path).with_context(|| format!("read {}", self.path.display()))?;
+        serde_json::from_slice(&bytes).with_context(|| format!("parse {}", self.path.display()))
+    }
+
+    fn save(&self, buckets: &[StoredActivityBucket]) -> Result<()> {
+        let temp_path = self.path.with_file_name("activity_events.json.tmp");
         let bytes = serde_json::to_vec_pretty(buckets)?;
         std::fs::write(&temp_path, bytes)
             .with_context(|| format!("write {}", temp_path.display()))?;
@@ -2311,6 +2619,281 @@ impl FirestoreBackupStore {
     }
 }
 
+struct FirestoreActivityStore {
+    config: FirestoreConfig,
+    client: reqwest::blocking::Client,
+    token_cache: Mutex<Option<CachedAccessToken>>,
+}
+
+impl FirestoreActivityStore {
+    fn new(config: FirestoreConfig) -> Result<Self> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(REQUEST_READ_TIMEOUT)
+            .build()
+            .context("build Firestore HTTP client")?;
+        Ok(Self {
+            config,
+            client,
+            token_cache: Mutex::new(None),
+        })
+    }
+
+    fn put(
+        &self,
+        bucket_id: &str,
+        auth_token: &str,
+        event: ActivityEvent,
+    ) -> Result<ActivityPutStatus> {
+        let name = self.document_name(bucket_id);
+        let existing = self.get_bucket(&name)?;
+        let auth_hash = activity_auth_hash(auth_token);
+        let now = Utc::now();
+        let (bucket, precondition, status) = match existing {
+            Some(FirestoreActivityDocument {
+                mut bucket,
+                update_time,
+            }) => {
+                let status = bucket.put(auth_token, event, now);
+                (
+                    bucket,
+                    FirestorePrecondition::UpdateTime(update_time),
+                    status,
+                )
+            }
+            None => {
+                let mut bucket = StoredActivityBucket::new(bucket_id, auth_hash, now);
+                let status = bucket.put(auth_token, event, now);
+                (bucket, FirestorePrecondition::Missing, status)
+            }
+        };
+
+        if matches!(status, ActivityPutStatus::Stored(_)) {
+            self.commit_bucket(&name, &bucket, precondition)?;
+        }
+        Ok(status)
+    }
+
+    fn list(
+        &self,
+        bucket_id: &str,
+        auth_token: &str,
+        limit: usize,
+        cursor: Option<&ActivityCursor>,
+        now: DateTime<Utc>,
+    ) -> Result<ActivityListStatus> {
+        let name = self.document_name(bucket_id);
+        let Some(FirestoreActivityDocument {
+            mut bucket,
+            update_time,
+        }) = self.get_bucket(&name)?
+        else {
+            return Ok(ActivityListStatus::NotFound);
+        };
+        let before = bucket.events.len();
+        let status = bucket.list(auth_token, limit, cursor, now);
+        if before != bucket.events.len() {
+            self.commit_bucket(
+                &name,
+                &bucket,
+                FirestorePrecondition::UpdateTime(update_time),
+            )?;
+        }
+        Ok(status)
+    }
+
+    fn get_bucket(&self, name: &str) -> Result<Option<FirestoreActivityDocument>> {
+        let url = format!(
+            "{}/{}",
+            self.config.api_base_url.trim_end_matches('/'),
+            name
+        );
+        let Some(document) = self.get_json(&url, "firestore.get_document")? else {
+            return Ok(None);
+        };
+        let update_time = document
+            .get("updateTime")
+            .and_then(serde_json::Value::as_str)
+            .context("Firestore activity document missing updateTime")?
+            .to_string();
+        let bucket = stored_activity_bucket_from_firestore_document(&document)?;
+        Ok(Some(FirestoreActivityDocument {
+            bucket,
+            update_time,
+        }))
+    }
+
+    fn commit_bucket(
+        &self,
+        name: &str,
+        bucket: &StoredActivityBucket,
+        precondition: FirestorePrecondition,
+    ) -> Result<()> {
+        let document = firestore_document_from_activity_bucket(name, bucket)?;
+        let body = json!({
+            "writes": [{
+                "update": document,
+                "currentDocument": precondition.to_json()
+            }]
+        });
+        self.post_json(&self.commit_url(), &body, "firestore.commit")?;
+        Ok(())
+    }
+
+    fn get_json(&self, url: &str, operation: &'static str) -> Result<Option<serde_json::Value>> {
+        let started = Instant::now();
+        let request = self.authorize(self.client.get(url))?;
+        let response = request
+            .send()
+            .with_context(|| format!("{operation} request failed"))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let status = response.status();
+        let text = response
+            .text()
+            .with_context(|| format!("{operation} response read failed"))?;
+        if !status.is_success() {
+            log_event(
+                firestore_event_name(operation, "failed"),
+                json!({
+                    "operation": operation,
+                    "status": status.as_u16(),
+                    "latency_ms": started.elapsed().as_millis()
+                }),
+            );
+            anyhow::bail!("{operation} failed with HTTP {}: {}", status.as_u16(), text);
+        }
+        log_event(
+            firestore_event_name(operation, "completed"),
+            json!({
+                "operation": operation,
+                "status": status.as_u16(),
+                "latency_ms": started.elapsed().as_millis()
+            }),
+        );
+        Ok(Some(
+            serde_json::from_str(&text).with_context(|| format!("{operation} invalid JSON"))?,
+        ))
+    }
+
+    fn post_json(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+        operation: &'static str,
+    ) -> Result<serde_json::Value> {
+        let started = Instant::now();
+        let request = self.authorize(self.client.post(url))?;
+        let response = request
+            .json(body)
+            .send()
+            .with_context(|| format!("{operation} request failed"))?;
+        let status = response.status();
+        let text = response
+            .text()
+            .with_context(|| format!("{operation} response read failed"))?;
+        if !status.is_success() {
+            log_event(
+                firestore_event_name(operation, "failed"),
+                json!({
+                    "operation": operation,
+                    "status": status.as_u16(),
+                    "latency_ms": started.elapsed().as_millis()
+                }),
+            );
+            anyhow::bail!("{operation} failed with HTTP {}: {}", status.as_u16(), text);
+        }
+        log_event(
+            firestore_event_name(operation, "completed"),
+            json!({
+                "operation": operation,
+                "status": status.as_u16(),
+                "latency_ms": started.elapsed().as_millis()
+            }),
+        );
+        serde_json::from_str(&text).with_context(|| format!("{operation} invalid JSON"))
+    }
+
+    fn authorize(
+        &self,
+        request: reqwest::blocking::RequestBuilder,
+    ) -> Result<reqwest::blocking::RequestBuilder> {
+        match &self.config.auth {
+            FirestoreAuth::None => Ok(request),
+            FirestoreAuth::Metadata => Ok(request.bearer_auth(self.metadata_access_token()?)),
+        }
+    }
+
+    fn metadata_access_token(&self) -> Result<String> {
+        let now = Instant::now();
+        if let Some(token) = self
+            .token_cache
+            .lock()
+            .expect("Firestore token cache mutex poisoned")
+            .as_ref()
+            .filter(|token| token.expires_at > now)
+        {
+            return Ok(token.value.clone());
+        }
+
+        let response: serde_json::Value = self
+            .client
+            .get(metadata_service_account_url("token"))
+            .header("Metadata-Flavor", "Google")
+            .send()
+            .context("request Google metadata access token")?
+            .error_for_status()
+            .context("Google metadata access token response")?
+            .json()
+            .context("parse Google metadata access token response")?;
+        let value = response
+            .get("access_token")
+            .and_then(serde_json::Value::as_str)
+            .context("Google metadata token response missing access_token")?
+            .to_string();
+        let expires_in = response
+            .get("expires_in")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(3600)
+            .saturating_sub(60)
+            .max(60);
+        let cached = CachedAccessToken {
+            value: value.clone(),
+            expires_at: Instant::now() + Duration::from_secs(expires_in),
+        };
+        *self
+            .token_cache
+            .lock()
+            .expect("Firestore token cache mutex poisoned") = Some(cached);
+
+        Ok(value)
+    }
+
+    fn document_name(&self, bucket_id: &str) -> String {
+        format!(
+            "{}/activity_buckets/{}",
+            self.documents_root(),
+            percent_encode_path_segment(bucket_id)
+        )
+    }
+
+    fn documents_root(&self) -> String {
+        format!(
+            "projects/{}/databases/{}/documents",
+            self.config.project_id, self.config.database_id
+        )
+    }
+
+    fn commit_url(&self) -> String {
+        format!(
+            "{}/projects/{}/databases/{}/documents:commit",
+            self.config.api_base_url.trim_end_matches('/'),
+            self.config.project_id,
+            self.config.database_id
+        )
+    }
+}
+
 struct FirestoreStoredDocument {
     record: StoredPublishRecord,
     update_time: String,
@@ -2318,6 +2901,11 @@ struct FirestoreStoredDocument {
 
 struct FirestoreBackupDocument {
     bucket: StoredHostedBackupBucket,
+    update_time: String,
+}
+
+struct FirestoreActivityDocument {
+    bucket: StoredActivityBucket,
     update_time: String,
 }
 
@@ -2457,6 +3045,32 @@ fn backup_store_from_env(data_dir: &Path) -> Result<BackupStore> {
     }
 
     BackupStore::file(data_dir)
+}
+
+fn activity_store_from_env(data_dir: &Path) -> Result<ActivityStore> {
+    let requested =
+        env_non_empty("AICHAN_ACTIVITY_STORE").or_else(|| env_non_empty("AICHAN_PUBLISH_STORE"));
+    match requested.as_deref() {
+        Some("file") => return ActivityStore::file(data_dir),
+        Some("firestore") => {
+            return Ok(ActivityStore::Firestore(FirestoreActivityStore::new(
+                FirestoreConfig::from_env()?,
+            )?))
+        }
+        Some(other) => anyhow::bail!("unsupported AICHAN_ACTIVITY_STORE value: {other}"),
+        None => {}
+    }
+
+    if env_non_empty("AICHAN_FIRESTORE_PROJECT_ID").is_some()
+        || env_non_empty("AICHAN_FIRESTORE_DATABASE").is_some()
+        || env_non_empty("AICHAN_FIRESTORE_EMULATOR_HOST").is_some()
+    {
+        return Ok(ActivityStore::Firestore(FirestoreActivityStore::new(
+            FirestoreConfig::from_env()?,
+        )?));
+    }
+
+    ActivityStore::file(data_dir)
 }
 
 fn metadata_project_id() -> Result<String> {
@@ -2742,6 +3356,51 @@ fn stored_backup_bucket_from_firestore_document(
     })
 }
 
+fn firestore_document_from_activity_bucket(
+    name: &str,
+    bucket: &StoredActivityBucket,
+) -> Result<serde_json::Value> {
+    let events_json = serde_json::to_string(&bucket.events)?;
+
+    Ok(json!({
+        "name": name,
+        "fields": {
+            "bucket_id": { "stringValue": bucket.bucket_id },
+            "auth_hash": { "stringValue": bucket.auth_hash },
+            "created_at": { "timestampValue": firestore_timestamp(bucket.created_at) },
+            "updated_at": { "timestampValue": firestore_timestamp(bucket.updated_at) },
+            "event_count": { "integerValue": bucket.events.len().to_string() },
+            "events_json": { "stringValue": events_json }
+        }
+    }))
+}
+
+fn stored_activity_bucket_from_firestore_document(
+    document: &serde_json::Value,
+) -> Result<StoredActivityBucket> {
+    let fields = document
+        .get("fields")
+        .and_then(serde_json::Value::as_object)
+        .context("Firestore activity document missing fields")?;
+    let bucket_id = firestore_string_field(fields, "bucket_id")?.to_string();
+    let auth_hash = firestore_string_field(fields, "auth_hash")?.to_string();
+    let events_json = firestore_string_field(fields, "events_json")?;
+    let events = serde_json::from_str::<Vec<StoredActivityEvent>>(events_json)
+        .context("Firestore events_json is not an activity event list")?;
+    let created_at = firestore_optional_timestamp_field(fields, "created_at")?
+        .context("Firestore activity document missing created_at")?;
+    let updated_at = firestore_optional_timestamp_field(fields, "updated_at")?
+        .context("Firestore activity document missing updated_at")?;
+
+    Ok(StoredActivityBucket {
+        bucket_id,
+        auth_hash,
+        events,
+        created_at,
+        updated_at,
+    })
+}
+
 fn firestore_inbox_query_body(
     recipient: &PeerId,
     limit: usize,
@@ -2908,6 +3567,26 @@ impl PublishSearchCursor {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ActivityCursor {
+    created_at: DateTime<Utc>,
+    event_id: String,
+}
+
+impl ActivityCursor {
+    fn encode(&self) -> Result<String> {
+        let bytes = serde_json::to_vec(self)?;
+        Ok(URL_SAFE_NO_PAD.encode(bytes))
+    }
+
+    fn decode(value: &str) -> Result<Self> {
+        let bytes = URL_SAFE_NO_PAD
+            .decode(value)
+            .context("activity cursor is not base64url")?;
+        serde_json::from_slice(&bytes).context("activity cursor is not valid JSON")
+    }
+}
+
 pub fn run_from_env() -> Result<()> {
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     let addr = format!("0.0.0.0:{port}");
@@ -3032,6 +3711,8 @@ pub fn handle_request(state: &ServerState, request: HttpRequest) -> HttpResponse
         }
         ("POST", "/v1/messages") => post_message(state, &request),
         ("GET", "/v1/inbox") => get_inbox(state, &request),
+        ("POST", "/v1/activity") => post_activity_event(state, &request),
+        ("GET", "/v1/activity") => get_activity_events(state, &request),
         ("PUT", path) if backup_lookup_path(path).is_some() => {
             put_hosted_backup(state, &request, backup_lookup_path(path).unwrap())
         }
@@ -3597,6 +4278,20 @@ fn backup_auth_token(request: &HttpRequest) -> Result<&str> {
     Ok(token)
 }
 
+fn activity_auth_token(request: &HttpRequest) -> Result<&str> {
+    let token = required_header(request, "Aichan-Activity-Auth")?.trim();
+    if token.len() < 12 {
+        anyhow::bail!("activity auth token is missing or too short");
+    }
+    Ok(token)
+}
+
+fn activity_bucket_header(request: &HttpRequest) -> Result<&str> {
+    let bucket_id = required_header(request, "Aichan-Activity-Bucket")?.trim();
+    validate_activity_bucket_id(bucket_id)?;
+    Ok(bucket_id)
+}
+
 fn parse_hosted_backup_package(body: &[u8]) -> Result<serde_json::Value> {
     let value: serde_json::Value =
         serde_json::from_slice(body).context("invalid JSON hosted backup package")?;
@@ -3651,6 +4346,16 @@ fn reject_private_backup_material(value: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
+fn parse_activity_event(body: &[u8]) -> Result<ActivityEvent> {
+    let event: ActivityEvent =
+        serde_json::from_slice(body).context("invalid JSON activity event")?;
+    event.validate()?;
+    if event.ciphertext.len() > MAX_ACTIVITY_CIPHERTEXT_CHARS {
+        anyhow::bail!("activity ciphertext is too large");
+    }
+    Ok(event)
+}
+
 fn validate_backup_lookup_id(lookup_id: &str) -> Result<()> {
     if lookup_id.len() > MAX_BACKUP_LOOKUP_ID_BYTES {
         anyhow::bail!("backup lookup id is too long");
@@ -3664,6 +4369,150 @@ fn validate_backup_lookup_id(lookup_id: &str) -> Result<()> {
         anyhow::bail!("backup lookup id contains unsupported characters");
     }
     Ok(())
+}
+
+fn validate_activity_bucket_id(bucket_id: &str) -> Result<()> {
+    if bucket_id.is_empty() {
+        anyhow::bail!("activity bucket id is required");
+    }
+    if bucket_id.len() > MAX_ACTIVITY_BUCKET_ID_BYTES {
+        anyhow::bail!("activity bucket id is too long");
+    }
+    if !bucket_id.bytes().all(|byte| {
+        matches!(
+            byte,
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.'
+        )
+    }) {
+        anyhow::bail!("activity bucket id contains unsupported characters");
+    }
+    Ok(())
+}
+
+fn post_activity_event(state: &ServerState, request: &HttpRequest) -> HttpResponse {
+    let bucket_id = match activity_bucket_header(request) {
+        Ok(bucket_id) => bucket_id,
+        Err(error) => {
+            return error_response(400, "invalid_activity_bucket", error.to_string(), false)
+        }
+    };
+    let auth_token = match activity_auth_token(request) {
+        Ok(token) => token,
+        Err(error) => {
+            return error_response(401, "invalid_activity_auth", error.to_string(), false)
+        }
+    };
+    let event = match parse_activity_event(&request.body) {
+        Ok(event) => event,
+        Err(error) => {
+            return error_response(400, "invalid_activity_event", error.to_string(), false)
+        }
+    };
+
+    match state.activity_store.put(bucket_id, auth_token, event) {
+        Ok(ActivityPutStatus::Stored(stored)) => json_response(
+            201,
+            json!({
+                "stored": true,
+                "bucket_id": bucket_id,
+                "event_id": stored.event.event_id,
+                "created_at": stored.event.created_at,
+                "expires_at": stored.event.expires_at,
+                "size_bytes": stored.size_bytes,
+                "content_sha256": stored.content_sha256,
+            }),
+        ),
+        Ok(ActivityPutStatus::Unauthorized) => error_response(
+            401,
+            "invalid_activity_auth",
+            "Activity auth token does not match this sync bucket.",
+            false,
+        ),
+        Err(error) => error_response(
+            500,
+            "storage_unavailable",
+            format!("Could not write activity event: {error}"),
+            true,
+        ),
+    }
+}
+
+fn get_activity_events(state: &ServerState, request: &HttpRequest) -> HttpResponse {
+    let params = parse_query(request.query().unwrap_or(""));
+    let Some(bucket_id) = params.get("bucket").map(String::as_str) else {
+        return error_response(
+            400,
+            "invalid_activity_bucket",
+            "activity bucket query parameter is required",
+            false,
+        );
+    };
+    if let Err(error) = validate_activity_bucket_id(bucket_id) {
+        return error_response(400, "invalid_activity_bucket", error.to_string(), false);
+    }
+    let auth_token = match activity_auth_token(request) {
+        Ok(token) => token,
+        Err(error) => {
+            return error_response(401, "invalid_activity_auth", error.to_string(), false)
+        }
+    };
+    let limit = params
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(ACTIVITY_DEFAULT_LIMIT)
+        .clamp(1, ACTIVITY_MAX_LIMIT);
+    let cursor = match params.get("cursor") {
+        Some(value) => match ActivityCursor::decode(value) {
+            Ok(cursor) => Some(cursor),
+            Err(error) => {
+                return error_response(
+                    400,
+                    "invalid_cursor",
+                    format!("Invalid activity cursor: {error}"),
+                    false,
+                )
+            }
+        },
+        None => None,
+    };
+
+    match state
+        .activity_store
+        .list(bucket_id, auth_token, limit, cursor.as_ref(), Utc::now())
+    {
+        Ok(ActivityListStatus::Found(page)) => json_response(
+            200,
+            json!({
+                "bucket_id": bucket_id,
+                "count": page.events.len(),
+                "events": page.events.into_iter().map(|entry| entry.event).collect::<Vec<_>>(),
+                "next_cursor": page.next_cursor,
+                "has_more": page.has_more,
+            }),
+        ),
+        Ok(ActivityListStatus::NotFound) => json_response(
+            200,
+            json!({
+                "bucket_id": bucket_id,
+                "count": 0,
+                "events": [],
+                "next_cursor": null,
+                "has_more": false,
+            }),
+        ),
+        Ok(ActivityListStatus::Unauthorized) => error_response(
+            401,
+            "invalid_activity_auth",
+            "Activity auth token does not match this sync bucket.",
+            false,
+        ),
+        Err(error) => error_response(
+            500,
+            "storage_unavailable",
+            format!("Could not read activity events: {error}"),
+            true,
+        ),
+    }
 }
 
 fn stats_response(state: &ServerState) -> HttpResponse {
@@ -4152,6 +5001,7 @@ fn discovery_response(state: &ServerState) -> HttpResponse {
                 "discover": "/v1/discover",
                 "messages": "/v1/messages",
                 "inbox": "/v1/inbox",
+                "activity": "/v1/activity",
                 "backups": "/v1/backups",
                 "agent": "/agent",
                 "agent_json": "/agent.json",
@@ -4162,6 +5012,9 @@ fn discovery_response(state: &ServerState) -> HttpResponse {
                 "max_message_bytes": 65536,
                 "max_backup_ciphertext_chars": MAX_BACKUP_CIPHERTEXT_CHARS,
                 "max_backup_generations": MAX_BACKUP_GENERATIONS,
+                "max_activity_ciphertext_chars": MAX_ACTIVITY_CIPHERTEXT_CHARS,
+                "max_activity_events": MAX_ACTIVITY_EVENTS,
+                "max_activity_limit": ACTIVITY_MAX_LIMIT,
                 "max_publish_body_bytes": 8192,
                 "max_discover_limit": DISCOVER_MAX_LIMIT,
                 "max_discover_tags": DISCOVER_MAX_TAGS,
@@ -4170,7 +5023,7 @@ fn discovery_response(state: &ServerState) -> HttpResponse {
                 "read_per_minute": state.rate_limits().read_per_minute,
                 "write_per_minute": state.rate_limits().write_per_minute
             },
-            "extensions": ["hosted_encrypted_backups"]
+            "extensions": ["hosted_encrypted_backups", "encrypted_activity_sync"]
         }),
     )
 }
@@ -4227,6 +5080,7 @@ aichan publish-search --tag agent-friends
 aichan discover --tag agent-friends
 aichan send <peer-id> "hello"
 aichan inbox
+aichan sync
 aichan backup create
 aichan backup create --upload
 aichan backup restore --file backup.aichan-backup
@@ -4307,6 +5161,7 @@ fn agent_json_response(state: &ServerState) -> HttpResponse {
                 "discover": "aichan discover --tag agent-friends",
                 "send": "aichan send <peer-id> \"hello\"",
                 "inbox": "aichan inbox",
+                "sync": "aichan sync",
                 "backup_create": "aichan backup create",
                 "backup_create_upload": "aichan backup create --upload",
                 "backup_restore": "AICHAN_RECOVERY_PHRASE=<phrase> aichan backup restore --file backup.aichan-backup",
@@ -4319,7 +5174,8 @@ fn agent_json_response(state: &ServerState) -> HttpResponse {
                 "install": "/install.sh",
                 "protocol": "/.well-known/aichan",
                 "publish_search": "/v1/publish/search",
-                "discover": "/v1/discover"
+                "discover": "/v1/discover",
+                "activity": "/v1/activity"
             }
         }),
     )
@@ -4859,6 +5715,8 @@ fn route_template<'a>(method: &str, path: &'a str) -> &'a str {
         ("GET", "/v1/discover") => "/v1/discover",
         ("POST", "/v1/messages") => "/v1/messages",
         ("GET", "/v1/inbox") => "/v1/inbox",
+        ("POST", "/v1/activity") => "/v1/activity",
+        ("GET", "/v1/activity") => "/v1/activity",
         ("PUT", path) if backup_lookup_path(path).is_some() => "/v1/backups/{backup_lookup_id}",
         ("GET", path) if backup_lookup_path(path).is_some() => "/v1/backups/{backup_lookup_id}",
         ("HEAD", path) if backup_lookup_path(path).is_some() => "/v1/backups/{backup_lookup_id}",
@@ -4890,6 +5748,7 @@ fn component_for_route(route: &str) -> &'static str {
         }
         "/v1/messages" => "message_handler",
         "/v1/inbox" => "inbox_handler",
+        "/v1/activity" => "activity_handler",
         "/v1/backups/{backup_lookup_id}" | "/v1/backups/{backup_lookup_id}/generations" => {
             "backup_handler"
         }
@@ -4920,7 +5779,7 @@ fn slow_request_threshold_ms(route: &str) -> Option<u64> {
         "/v1/publish/search" => Some(1000),
         "/v1/messages" => Some(1000),
         "/v1/inbox" => Some(1500),
-        "/v1/activity/sync" => Some(1500),
+        "/v1/activity" => Some(1500),
         "/v1/backups/{backup_lookup_id}" => Some(3000),
         "/v1/backups/{backup_lookup_id}/generations" => Some(2000),
         _ => None,
@@ -4949,7 +5808,8 @@ fn error_category(code: &str) -> &'static str {
         "invalid_request_signature"
         | "invalid_admin_auth"
         | "missing_admin_auth"
-        | "invalid_backup_auth" => "auth",
+        | "invalid_backup_auth"
+        | "invalid_activity_auth" => "auth",
         "invalid_publish_signature" | "invalid_message_signature" => "crypto",
         "rate_limited" => "rate_limit",
         "storage_unavailable" | "firestore_unavailable" => "storage",
@@ -4961,6 +5821,8 @@ fn error_category(code: &str) -> &'static str {
         | "invalid_admin_request"
         | "invalid_backup_lookup_id"
         | "invalid_backup_package"
+        | "invalid_activity_bucket"
+        | "invalid_activity_event"
         | "not_found"
         | "author_deleted" => "validation",
         "server_busy" => "dependency",
@@ -4973,6 +5835,7 @@ fn safe_error_message(code: &str) -> &'static str {
         "invalid_request_signature" => "Request signature could not be verified.",
         "invalid_admin_auth" | "missing_admin_auth" => "Admin authentication failed.",
         "invalid_backup_auth" => "Hosted backup authentication failed.",
+        "invalid_activity_auth" => "Activity sync authentication failed.",
         "invalid_publish_signature" => "Publish signature could not be verified.",
         "invalid_message_signature" => "Message signature could not be verified.",
         "rate_limited" => "Rate limit exceeded.",
@@ -4984,7 +5847,9 @@ fn safe_error_message(code: &str) -> &'static str {
         | "invalid_request"
         | "invalid_admin_request"
         | "invalid_backup_lookup_id"
-        | "invalid_backup_package" => "Request was invalid.",
+        | "invalid_backup_package"
+        | "invalid_activity_bucket"
+        | "invalid_activity_event" => "Request was invalid.",
         "not_found" => "Requested resource was not found.",
         "author_deleted" => "Resource was author-deleted.",
         "server_busy" => "Server is at the configured connection limit.",
@@ -5188,6 +6053,59 @@ mod tests {
             parsed.generations[0].backup["ciphertext"],
             "ciphertext_firestore_test"
         );
+    }
+
+    #[test]
+    fn firestore_activity_document_round_trips_ciphertext_event_without_auth_token() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap();
+        let auth_token = "activity-auth-secret";
+        let event: ActivityEvent = serde_json::from_value(json!({
+            "version": 1,
+            "event_id": "act_firestore_001",
+            "source_device_id": "device_11111111111111111111111111111111",
+            "created_at": now.to_rfc3339(),
+            "expires_at": (now + ChronoDuration::seconds(604800)).to_rfc3339(),
+            "content_encoding": "application/aichan+json; version=1",
+            "encryption": {
+                "suite": "aichan.activity.chacha20poly1305.hkdf-sha256.v1",
+                "kdf": "hkdf-sha256",
+                "salt": "salt_firestore",
+                "nonce": "nonce_firestore"
+            },
+            "ciphertext": "ciphertext_activity_firestore_test"
+        }))
+        .unwrap();
+        let mut bucket = StoredActivityBucket::new(
+            "sync_bucket_firestore_001",
+            activity_auth_hash(auth_token),
+            now,
+        );
+        let status = bucket.put(auth_token, event, now);
+        assert!(matches!(status, ActivityPutStatus::Stored(_)));
+
+        let name =
+            "projects/aichan-test/databases/(default)/documents/activity_buckets/sync_bucket_firestore_001";
+        let document = firestore_document_from_activity_bucket(name, &bucket).unwrap();
+        let fields = document["fields"].as_object().unwrap();
+
+        assert_eq!(
+            fields.get("bucket_id").unwrap(),
+            &json!({ "stringValue": "sync_bucket_firestore_001" })
+        );
+        assert_eq!(
+            fields.get("event_count").unwrap(),
+            &json!({ "integerValue": "1" })
+        );
+        assert!(fields["events_json"]["stringValue"]
+            .as_str()
+            .unwrap()
+            .contains("ciphertext_activity_firestore_test"));
+        assert!(!document.to_string().contains(auth_token));
+
+        let parsed = stored_activity_bucket_from_firestore_document(&document).unwrap();
+        assert_eq!(parsed.bucket_id, "sync_bucket_firestore_001");
+        assert_eq!(parsed.events.len(), 1);
+        assert_eq!(parsed.events[0].event.event_id, "act_firestore_001");
     }
 
     #[test]

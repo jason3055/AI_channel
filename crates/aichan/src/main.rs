@@ -10,13 +10,15 @@ use aichan_core::protocol::{
     PublishRecordPayload, RequestToSign, SignedProtocolObject, UnsignedProtocolObject,
 };
 use aichan_core::{
-    decrypt_backup, derive_hosted_backup_locator, encrypt_backup, generate_recovery_phrase,
+    decrypt_activity_snapshot, decrypt_backup, derive_activity_locator,
+    derive_hosted_backup_locator, encrypt_activity_snapshot, encrypt_backup,
+    generate_recovery_phrase,
     message_crypto::{
         decrypt_private_message, encrypt_private_message, message_encryption_aad,
         SealedPrivateMessage, MESSAGE_ENCRYPTION_SUITE,
     },
-    AichanConfig, BackupFile, BackupMetadata, BackupPayload, DeviceFile, HostedBackupLocator,
-    IdentityFile, LocalStateDir, MemoryFile, PeerId,
+    ActivityEvent, ActivityLocator, AichanConfig, BackupFile, BackupMetadata, BackupPayload,
+    DeviceFile, HostedBackupLocator, IdentityFile, LocalStateDir, MemoryFile, PeerId,
 };
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
@@ -70,6 +72,9 @@ enum Command {
 
     /// Fetch and decrypt encrypted private messages for this identity.
     Inbox(InboxArgs),
+
+    /// Upload and fetch encrypted memory/activity sync events.
+    Sync(SyncArgs),
 
     /// Create, restore, or inspect encrypted local backups.
     #[command(subcommand)]
@@ -177,6 +182,17 @@ struct InboxArgs {
     base_url: Option<String>,
 }
 
+#[derive(Debug, Parser)]
+struct SyncArgs {
+    /// Maximum activity events to fetch.
+    #[arg(long, default_value_t = 100)]
+    limit: usize,
+
+    /// Relay base URL. Defaults to config or compiled default.
+    #[arg(long)]
+    base_url: Option<String>,
+}
+
 #[derive(Debug, Subcommand)]
 enum BackupCommand {
     /// Create a local encrypted backup package.
@@ -260,6 +276,7 @@ fn main() -> Result<()> {
         Command::PublishDelete(args) => publish_delete(&state, args, cli.json),
         Command::Send(args) => send_message(&state, args, cli.json),
         Command::Inbox(args) => inbox(&state, args, cli.json),
+        Command::Sync(args) => sync_activity(&state, args, cli.json),
         Command::Backup(command) => backup(&state, command, cli.json),
         Command::Upgrade(args) => upgrade(args, cli.json),
     }
@@ -389,11 +406,13 @@ fn print_status(state: &LocalStateDir, json: bool) -> Result<()> {
     let config = AichanConfig::load_or_default(state)?;
 
     if json {
+        let sync_warning = sync_window_warning(memory.sync.last_sync_at, Utc::now());
         let value = serde_json::json!({
             "peer_id": identity.peer_id,
             "device_id": device.device_id,
             "base_url": config.effective_base_url(None),
             "last_sync_at": memory.sync.last_sync_at,
+            "sync_warning": sync_warning,
             "common_tags": memory.common_tags,
         });
         println!("{}", serde_json::to_string_pretty(&value)?);
@@ -404,6 +423,15 @@ fn print_status(state: &LocalStateDir, json: bool) -> Result<()> {
         match memory.sync.last_sync_at {
             Some(ts) => println!("last_sync_at: {ts}"),
             None => println!("last_sync_at: never"),
+        }
+        if let Some(warning) = sync_window_warning(memory.sync.last_sync_at, Utc::now()) {
+            println!(
+                "sync_warning: {}",
+                warning
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("sync state may be stale")
+            );
         }
     }
     Ok(())
@@ -729,6 +757,238 @@ fn inbox(state: &LocalStateDir, args: InboxArgs, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ActivityUploadResponse {
+    event_id: String,
+    stored: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ActivityListResponse {
+    events: Vec<ActivityEvent>,
+    next_cursor: Option<String>,
+}
+
+fn sync_activity(state: &LocalStateDir, args: SyncArgs, json: bool) -> Result<()> {
+    let identity = IdentityFile::create_or_load(state)?;
+    let device = DeviceFile::create_or_load(state)?;
+    let mut memory = MemoryFile::create_or_load(state)?;
+    let config = AichanConfig::load_or_default(state)?;
+    let base_url = config.effective_base_url(args.base_url.as_deref());
+    let locator = derive_activity_locator(&identity)?;
+    let warning_before = sync_window_warning(memory.sync.last_sync_at, Utc::now());
+
+    let event = encrypt_activity_snapshot(&identity, device.device_id.clone(), &memory)?;
+    let upload = upload_activity_event(base_url, &locator, &event)?;
+    let page = download_activity_events(
+        base_url,
+        &locator,
+        memory.sync.activity_cursor.as_deref(),
+        args.limit.clamp(1, 500),
+    )?;
+
+    let mut pulled = 0_usize;
+    let mut applied = 0_usize;
+    let mut skipped_self = 0_usize;
+    for event in &page.events {
+        pulled += 1;
+        if event.source_device_id == device.device_id {
+            skipped_self += 1;
+            continue;
+        }
+        let payload = decrypt_activity_snapshot(&identity, event)?;
+        if merge_memory_snapshot(&mut memory, &payload.memory) {
+            applied += 1;
+        }
+    }
+
+    let synced_at = Utc::now();
+    memory.sync.last_sync_at = Some(synced_at);
+    memory.sync.activity_cursor = page.next_cursor.clone();
+    memory.write_to(state.memory_path())?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "synced": true,
+                "uploaded": upload.stored,
+                "uploaded_event_id": upload.event_id,
+                "pulled": pulled,
+                "applied": applied,
+                "skipped_self": skipped_self,
+                "next_cursor": page.next_cursor,
+                "last_sync_at": synced_at,
+                "sync_warning_before": warning_before,
+            }))?
+        );
+    } else {
+        println!("synced: true");
+        println!("uploaded: {}", upload.stored);
+        println!("uploaded_event_id: {}", upload.event_id);
+        println!("pulled: {pulled}");
+        println!("applied: {applied}");
+        println!("skipped_self: {skipped_self}");
+        if let Some(warning) = warning_before {
+            println!(
+                "sync_warning_before: {}",
+                warning
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("sync state may be stale")
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn upload_activity_event(
+    base_url: &str,
+    locator: &ActivityLocator,
+    event: &ActivityEvent,
+) -> Result<ActivityUploadResponse> {
+    let body = serde_json::to_vec(event)?;
+    let response = relay_request(
+        "POST",
+        base_url,
+        "/v1/activity",
+        &[
+            ("Content-Type", "application/json"),
+            ("Aichan-Activity-Bucket", locator.bucket_id.as_str()),
+            ("Aichan-Activity-Auth", locator.auth_token.as_str()),
+        ],
+        &body,
+    )?;
+    if response.status >= 400 {
+        return Err(anyhow!(
+            "relay returned HTTP {} while uploading activity event: {}",
+            response.status,
+            response.body_text()
+        ));
+    }
+    serde_json::from_slice(&response.body).context("parse activity upload response")
+}
+
+fn download_activity_events(
+    base_url: &str,
+    locator: &ActivityLocator,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<ActivityListResponse> {
+    let mut path = format!(
+        "/v1/activity?bucket={}&limit={}",
+        query_escape(&locator.bucket_id),
+        limit
+    );
+    if let Some(cursor) = cursor {
+        path.push_str("&cursor=");
+        path.push_str(&query_escape(cursor));
+    }
+    let response = relay_request(
+        "GET",
+        base_url,
+        &path,
+        &[("Aichan-Activity-Auth", locator.auth_token.as_str())],
+        &[],
+    )?;
+    if response.status >= 400 {
+        return Err(anyhow!(
+            "relay returned HTTP {} while downloading activity events: {}",
+            response.status,
+            response.body_text()
+        ));
+    }
+    serde_json::from_slice(&response.body).context("parse activity list response")
+}
+
+fn merge_memory_snapshot(local: &mut MemoryFile, remote: &MemoryFile) -> bool {
+    let mut changed = false;
+
+    if remote.updated_at > local.updated_at && local.profile != remote.profile {
+        local.profile = remote.profile.clone();
+        changed = true;
+    }
+
+    for tag in &remote.common_tags {
+        if !local.common_tags.iter().any(|existing| existing == tag) {
+            local.common_tags.push(tag.clone());
+            changed = true;
+        }
+    }
+    local.common_tags.sort();
+    local.common_tags.dedup();
+
+    for remote_peer in &remote.discovered_peers {
+        match local
+            .discovered_peers
+            .iter_mut()
+            .find(|peer| peer.peer_id == remote_peer.peer_id)
+        {
+            Some(local_peer) if remote_peer.last_seen_at > local_peer.last_seen_at => {
+                *local_peer = remote_peer.clone();
+                changed = true;
+            }
+            None => {
+                local.discovered_peers.push(remote_peer.clone());
+                changed = true;
+            }
+            _ => {}
+        }
+    }
+
+    for remote_interaction in &remote.interactions {
+        match local
+            .interactions
+            .iter_mut()
+            .find(|interaction| interaction.peer_id == remote_interaction.peer_id)
+        {
+            Some(local_interaction)
+                if remote_interaction.updated_at > local_interaction.updated_at =>
+            {
+                *local_interaction = remote_interaction.clone();
+                changed = true;
+            }
+            None => {
+                local.interactions.push(remote_interaction.clone());
+                changed = true;
+            }
+            _ => {}
+        }
+    }
+
+    if changed && remote.updated_at > local.updated_at {
+        local.updated_at = remote.updated_at;
+    }
+
+    changed
+}
+
+fn sync_window_warning(
+    last_sync_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Option<serde_json::Value> {
+    let last_sync_at = last_sync_at?;
+    let age = now.signed_duration_since(last_sync_at);
+    if age >= chrono::Duration::days(7) {
+        return Some(serde_json::json!({
+            "level": "stale",
+            "last_sync_at": last_sync_at,
+            "age_seconds": age.num_seconds(),
+            "message": "device is past the seven-day sync window and may be missing state; restore or compare against a fresher backup",
+        }));
+    }
+    if age >= chrono::Duration::days(5) {
+        return Some(serde_json::json!({
+            "level": "warning",
+            "last_sync_at": last_sync_at,
+            "age_seconds": age.num_seconds(),
+            "message": "device is approaching the seven-day sync window edge; run aichan sync or refresh from a newer backup",
+        }));
+    }
+    None
 }
 
 fn backup(state: &LocalStateDir, command: BackupCommand, json: bool) -> Result<()> {

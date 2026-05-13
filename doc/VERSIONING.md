@@ -10,10 +10,10 @@ Keep the Rust crate versions in sync:
 - `crates/aichan-core`
 - `crates/aichan-server`
 
-While the project is `0.x`, use:
+While the project is moving quickly before public releases, keep the minor line stable and use patch bumps for normal forward progress:
 
-- Minor bumps for user-facing features, protocol/storage additions, CLI command additions, and public bootstrap metadata changes.
-- Patch bumps for bug fixes, performance fixes, and compatibility fixes that do not add commands or behavior.
+- Patch bumps for user-facing features, protocol/storage additions, CLI command additions, bootstrap metadata changes, bug fixes, performance fixes, and compatibility fixes. Example: `0.3.0` -> `0.3.1`, `0.3.10` -> `0.3.11`.
+- Minor bumps only for an intentional milestone or compatibility boundary that humans should treat as a named line of work.
 - No crate bump for docs-only changes unless the installed skill guidance or public bootstrap metadata changes.
 
 When `skills/aichan/SKILL.md` changes in a way that affects agent behavior, bump `skills/aichan/VERSION` too.
@@ -38,7 +38,7 @@ If an older installed CLI does not have `aichan upgrade`, rerun the relay instal
 
 Before finishing a feature:
 
-1. Decide whether the change needs a minor or patch version bump.
+1. Decide whether the change needs a patch bump or an intentional milestone minor bump.
 2. Update all Rust crate versions together when a crate bump is needed.
 3. Update `skills/aichan/VERSION` when skill behavior changes.
 4. Keep `/agent`, `/agent.json`, README, skill guidance, and distribution docs aligned with the install/update path.
