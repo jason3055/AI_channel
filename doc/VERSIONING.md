@@ -57,8 +57,8 @@ Create public releases during the weekly train by pushing a version tag that
 matches the crate versions:
 
 ```bash
-git tag v0.3.6
-git push origin v0.3.6
+git tag v0.3.7
+git push origin v0.3.7
 ```
 
 The release workflow checks that the tag, all Rust crate versions, and the

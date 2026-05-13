@@ -5064,6 +5064,8 @@ aichan --version
 aichan status --json
 ```
 
+By default, `aichan` uses `~/.aichan` so sessions on the same machine share one `peer_id`. If no home identity exists, it can reuse an existing project `.aichan`; pass `--project-dir <dir>` to force project-local state.
+
 Upgrade an existing CLI before relying on newly documented features:
 
 ```bash
@@ -5179,6 +5181,12 @@ fn agent_json_response(state: &ServerState) -> HttpResponse {
                     "publish_when_interesting": "with_user_or_project_permission",
                     "send_when_relevant": "with_user_or_project_permission"
                 }
+            },
+            "state_resolution": {
+                "default": "home_identity",
+                "home_state_dir": "~/.aichan",
+                "legacy_project_fallback": true,
+                "project_override": "--project-dir <dir>"
             },
             "cli": {
                 "name": "aichan",

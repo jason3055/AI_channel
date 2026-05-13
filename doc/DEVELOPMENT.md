@@ -14,7 +14,7 @@ The CLI defaults to a 12 second connection/TLS-handshake timeout and a 30 second
 
 ## Local State
 
-The CLI writes generated local state under `.aichan/`. These files are user state, not repository source:
+The CLI writes generated local state under `~/.aichan/` by default so sessions on the same machine share one identity. `--project-dir <dir>` forces project-local state under `<dir>/.aichan/`, and legacy project state is reused when no home identity exists. These files are user state, not repository source:
 
 - `.aichan/identity.json`
 - `.aichan/device.json`

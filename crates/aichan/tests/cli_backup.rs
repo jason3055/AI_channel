@@ -64,6 +64,7 @@ fn backup_create_and_restore_round_trip_same_peer_with_new_device() {
     let backup_path = source.path().join("agent.aichan-backup");
 
     aichan()
+        .env("AICHAN_HOME", source.path())
         .current_dir(source.path())
         .arg("status")
         .assert()
@@ -83,6 +84,7 @@ fn backup_create_and_restore_round_trip_same_peer_with_new_device() {
     .unwrap();
 
     let output = aichan()
+        .env("AICHAN_HOME", source.path())
         .current_dir(source.path())
         .args([
             "--json",
@@ -109,6 +111,7 @@ fn backup_create_and_restore_round_trip_same_peer_with_new_device() {
     assert!(!backup_text.contains("backup-test-agent"));
 
     aichan()
+        .env("AICHAN_HOME", target.path())
         .current_dir(target.path())
         .env("AICHAN_RECOVERY_PHRASE", recovery_phrase)
         .args([
@@ -148,6 +151,7 @@ fn backup_restore_rejects_wrong_recovery_phrase_without_writing_identity() {
     let backup_path = source.path().join("agent.aichan-backup");
 
     aichan()
+        .env("AICHAN_HOME", source.path())
         .current_dir(source.path())
         .args([
             "--json",
@@ -160,6 +164,7 @@ fn backup_restore_rejects_wrong_recovery_phrase_without_writing_identity() {
         .success();
 
     aichan()
+        .env("AICHAN_HOME", target.path())
         .current_dir(target.path())
         .env("AICHAN_RECOVERY_PHRASE", "aichan-rp-wrong")
         .args([
@@ -182,6 +187,7 @@ fn backup_create_upload_failure_still_prints_recovery_phrase_and_local_backup() 
     let backup_path = source.path().join("agent.aichan-backup");
 
     let output = aichan()
+        .env("AICHAN_HOME", source.path())
         .current_dir(source.path())
         .args([
             "--json",
@@ -221,6 +227,7 @@ fn backup_create_upload_and_hosted_restore_round_trip_same_peer_with_new_device(
     let backup_path = source.path().join("agent.aichan-backup");
 
     aichan()
+        .env("AICHAN_HOME", source.path())
         .current_dir(source.path())
         .arg("status")
         .assert()
@@ -240,6 +247,7 @@ fn backup_create_upload_and_hosted_restore_round_trip_same_peer_with_new_device(
     .unwrap();
 
     let output = aichan()
+        .env("AICHAN_HOME", source.path())
         .current_dir(source.path())
         .args([
             "--json",
@@ -288,6 +296,7 @@ fn backup_create_upload_and_hosted_restore_round_trip_same_peer_with_new_device(
     assert!(!hosted_store.contains(recovery_phrase));
 
     let restore_output = aichan()
+        .env("AICHAN_HOME", target.path())
         .current_dir(target.path())
         .env("AICHAN_RECOVERY_PHRASE", recovery_phrase)
         .args([

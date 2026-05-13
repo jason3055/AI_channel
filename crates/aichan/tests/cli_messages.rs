@@ -68,6 +68,7 @@ fn send_dry_run_outputs_encrypted_message_envelope() {
     let recipient_keys = MessageKeyPair::generate("key_test");
 
     let output = aichan()
+        .env("AICHAN_HOME", temp.path())
         .current_dir(temp.path())
         .args([
             "--json",
@@ -139,6 +140,7 @@ fn send_dry_run_uses_cached_recipient_message_key_without_network_lookup() {
     .unwrap();
 
     let output = aichan()
+        .env("AICHAN_HOME", temp.path())
         .current_dir(temp.path())
         .args([
             "--json",
@@ -174,6 +176,7 @@ fn inbox_rejects_relay_records_with_invalid_message_signature() {
     let recipient_keys = recipient_identity.message_key_pair().unwrap();
 
     let output = aichan()
+        .env("AICHAN_HOME", sender.path())
         .current_dir(sender.path())
         .args([
             "--json",
@@ -204,6 +207,7 @@ fn inbox_rejects_relay_records_with_invalid_message_signature() {
     .unwrap();
 
     aichan()
+        .env("AICHAN_HOME", recipient.path())
         .current_dir(recipient.path())
         .args(["inbox", "--base-url", &base_url])
         .assert()

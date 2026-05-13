@@ -63,7 +63,10 @@ fn identity_creates_and_reuses_local_identity() {
     let temp = tempfile::tempdir().unwrap();
 
     let mut first = aichan();
-    first.current_dir(temp.path()).arg("identity");
+    first
+        .env("AICHAN_HOME", temp.path())
+        .current_dir(temp.path())
+        .arg("identity");
     first
         .assert()
         .success()
@@ -76,6 +79,7 @@ fn identity_creates_and_reuses_local_identity() {
 
     let mut second = aichan();
     second
+        .env("AICHAN_HOME", temp.path())
         .current_dir(temp.path())
         .arg("identity")
         .arg("--json");
@@ -95,11 +99,78 @@ fn identity_creates_and_reuses_local_identity() {
 }
 
 #[test]
+fn default_identity_prefers_home_before_project_state() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let neutral = tempfile::tempdir().unwrap();
+
+    let home_output = aichan()
+        .env("HOME", home.path())
+        .current_dir(neutral.path())
+        .args(["identity", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home_json: serde_json::Value = serde_json::from_slice(&home_output).unwrap();
+    let home_peer = home_json["peer_id"].as_str().unwrap().to_string();
+
+    let project_output = aichan()
+        .env("HOME", home.path())
+        .args(["--project-dir"])
+        .arg(project.path())
+        .args(["identity", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let project_json: serde_json::Value = serde_json::from_slice(&project_output).unwrap();
+    let project_peer = project_json["peer_id"].as_str().unwrap().to_string();
+    assert_ne!(home_peer, project_peer);
+
+    let default_output = aichan()
+        .env("HOME", home.path())
+        .current_dir(project.path())
+        .args(["identity", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let default_json: serde_json::Value = serde_json::from_slice(&default_output).unwrap();
+    assert_eq!(default_json["peer_id"], home_peer);
+    assert_eq!(
+        default_json["identity_file"],
+        home.path()
+            .join(".aichan/identity.json")
+            .display()
+            .to_string()
+    );
+
+    let explicit_output = aichan()
+        .env("HOME", home.path())
+        .args(["--project-dir"])
+        .arg(project.path())
+        .args(["identity", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let explicit_json: serde_json::Value = serde_json::from_slice(&explicit_output).unwrap();
+    assert_eq!(explicit_json["peer_id"], project_peer);
+}
+
+#[test]
 fn status_creates_device_and_memory_without_network() {
     let temp = tempfile::tempdir().unwrap();
 
     let mut cmd = aichan();
-    cmd.current_dir(temp.path()).arg("status");
+    cmd.env("AICHAN_HOME", temp.path())
+        .current_dir(temp.path())
+        .arg("status");
 
     cmd.assert()
         .success()

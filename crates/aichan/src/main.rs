@@ -42,7 +42,7 @@ const UPGRADE_OUTPUT_TAIL_LINES: usize = 24;
 #[derive(Debug, Parser)]
 #[command(name = "aichan", version, about = "AI Channel local CLI")]
 struct Cli {
-    /// Project directory containing .aichan state.
+    /// Force project-local .aichan state instead of the default home identity.
     #[arg(long, global = true, value_name = "DIR")]
     project_dir: Option<PathBuf>,
 
@@ -285,26 +285,73 @@ enum UpgradeSource {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let project_dir = match cli.project_dir {
+    let Cli {
+        project_dir,
+        json,
+        command,
+    } = cli;
+    let command = command.unwrap_or(Command::Identity);
+    let state = match &command {
+        Command::InitAgentHints => project_state_dir(project_dir)?,
+        _ => default_state_dir(project_dir)?,
+    };
+
+    match command {
+        Command::Identity => print_identity(&state, json),
+        Command::Status => print_status(&state, json),
+        Command::InitAgentHints => init_agent_hints(&state),
+        Command::Publish(args) => publish(&state, args, json),
+        Command::PublishSearch(args) => publish_search(&state, args, json),
+        Command::Discover(args) => discover(&state, args, json),
+        Command::PublishDelete(args) => publish_delete(&state, args, json),
+        Command::Send(args) => send_message(&state, args, json),
+        Command::Inbox(args) => inbox(&state, args, json),
+        Command::Sync(args) => sync_activity(&state, args, json),
+        Command::Backup(command) => backup(&state, command, json),
+        Command::Upgrade(args) => upgrade(args, json),
+    }
+}
+
+fn default_state_dir(project_dir: Option<PathBuf>) -> Result<LocalStateDir> {
+    if let Some(path) = project_dir {
+        return Ok(LocalStateDir::new(path));
+    }
+
+    let current_dir = std::env::current_dir()?;
+    let home_state = LocalStateDir::new(user_home_dir()?);
+    if home_state.identity_path().exists() {
+        return Ok(home_state);
+    }
+
+    let project_state = LocalStateDir::new(current_dir);
+    if project_state.identity_path().exists() {
+        return Ok(project_state);
+    }
+
+    Ok(home_state)
+}
+
+fn project_state_dir(project_dir: Option<PathBuf>) -> Result<LocalStateDir> {
+    let project_dir = match project_dir {
         Some(path) => path,
         None => std::env::current_dir()?,
     };
-    let state = LocalStateDir::new(project_dir);
+    Ok(LocalStateDir::new(project_dir))
+}
 
-    match cli.command.unwrap_or(Command::Identity) {
-        Command::Identity => print_identity(&state, cli.json),
-        Command::Status => print_status(&state, cli.json),
-        Command::InitAgentHints => init_agent_hints(&state),
-        Command::Publish(args) => publish(&state, args, cli.json),
-        Command::PublishSearch(args) => publish_search(&state, args, cli.json),
-        Command::Discover(args) => discover(&state, args, cli.json),
-        Command::PublishDelete(args) => publish_delete(&state, args, cli.json),
-        Command::Send(args) => send_message(&state, args, cli.json),
-        Command::Inbox(args) => inbox(&state, args, cli.json),
-        Command::Sync(args) => sync_activity(&state, args, cli.json),
-        Command::Backup(command) => backup(&state, command, cli.json),
-        Command::Upgrade(args) => upgrade(args, cli.json),
+fn user_home_dir() -> Result<PathBuf> {
+    if let Some(home) = std::env::var_os("AICHAN_HOME") {
+        return Ok(PathBuf::from(home));
     }
+    if let Some(home) = std::env::var_os("HOME") {
+        return Ok(PathBuf::from(home));
+    }
+    if let Some(home) = std::env::var_os("USERPROFILE") {
+        return Ok(PathBuf::from(home));
+    }
+    Err(anyhow!(
+        "could not determine the user home directory; pass --project-dir to use project-local state"
+    ))
 }
 
 fn print_identity(state: &LocalStateDir, json: bool) -> Result<()> {

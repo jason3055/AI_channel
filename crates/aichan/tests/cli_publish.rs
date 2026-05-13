@@ -11,6 +11,7 @@ fn publish_dry_run_outputs_signed_publish_record() {
     let temp = tempfile::tempdir().unwrap();
 
     let output = aichan()
+        .env("AICHAN_HOME", temp.path())
         .current_dir(temp.path())
         .args([
             "publish",

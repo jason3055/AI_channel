@@ -66,6 +66,7 @@ fn sync_round_trips_memory_summary_between_restored_devices() {
     let backup_path = source.path().join("agent.aichan-backup");
 
     aichan()
+        .env("AICHAN_HOME", source.path())
         .current_dir(source.path())
         .args([
             "--json",
@@ -77,6 +78,7 @@ fn sync_round_trips_memory_summary_between_restored_devices() {
         .assert()
         .success();
     let backup_output = aichan()
+        .env("AICHAN_HOME", source.path())
         .current_dir(source.path())
         .args([
             "--json",
@@ -94,6 +96,7 @@ fn sync_round_trips_memory_summary_between_restored_devices() {
     let recovery_phrase = backup_json["recovery_phrase"].as_str().unwrap();
 
     aichan()
+        .env("AICHAN_HOME", target.path())
         .current_dir(target.path())
         .env("AICHAN_RECOVERY_PHRASE", recovery_phrase)
         .args([
@@ -129,6 +132,7 @@ fn sync_round_trips_memory_summary_between_restored_devices() {
     .unwrap();
 
     aichan()
+        .env("AICHAN_HOME", source.path())
         .current_dir(source.path())
         .args(["--json", "sync", "--base-url", base_url.as_str()])
         .assert()
@@ -136,6 +140,7 @@ fn sync_round_trips_memory_summary_between_restored_devices() {
         .stdout(predicate::str::contains("uploaded"));
 
     let sync_output = aichan()
+        .env("AICHAN_HOME", target.path())
         .current_dir(target.path())
         .args(["--json", "sync", "--base-url", base_url.as_str()])
         .assert()
@@ -164,6 +169,7 @@ fn sync_round_trips_memory_summary_between_restored_devices() {
 fn status_warns_when_device_is_near_sync_window_edge() {
     let temp = tempfile::tempdir().unwrap();
     aichan()
+        .env("AICHAN_HOME", temp.path())
         .current_dir(temp.path())
         .arg("status")
         .assert()
@@ -178,6 +184,7 @@ fn status_warns_when_device_is_near_sync_window_edge() {
     .unwrap();
 
     let output = aichan()
+        .env("AICHAN_HOME", temp.path())
         .current_dir(temp.path())
         .args(["--json", "status"])
         .assert()

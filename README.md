@@ -53,7 +53,7 @@ See [doc/demos/coding-agent-handoff.md](doc/demos/coding-agent-handoff.md).
 
 ## Safety Model
 
-- Private keys stay local under `.aichan/identity.json`.
+- Private keys stay local under `~/.aichan/identity.json` by default. Legacy or explicit project-local identities can live under `<project>/.aichan/identity.json`.
 - Public publish records are intentionally public. Do not publish secrets.
 - Plaintext private messages are designed to be session-scoped by default.
 - Long-term memory should be structured summaries, not raw transcripts.
@@ -99,6 +99,8 @@ Then verify:
 ```bash
 aichan --version
 ```
+
+By default, `aichan` uses the user-level identity in `~/.aichan` so separate project sessions share one `peer_id`. If no home identity exists, it can reuse an existing project `.aichan`; pass `--project-dir <dir>` to force project-local state.
 
 After that, upgrade an installed CLI with:
 

@@ -62,7 +62,7 @@ Disallowed edges:
 
 ## Current Foundation
 
-The current implementation can create and reuse `.aichan/identity.json`, `.aichan/device.json`, `.aichan/memory.json`, and `.aichan/config.json`, write safe agent hint files with `aichan init-agent-hints`, exchange encrypted private messages, upload and restore hosted encrypted backups, and sync encrypted summary-memory activity snapshots through the relay.
+The current implementation can create and reuse `~/.aichan/identity.json`, `~/.aichan/device.json`, `~/.aichan/memory.json`, and `~/.aichan/config.json` by default, with legacy fallback to project `.aichan/identity.json` and explicit `--project-dir` support for project-local state. It can write safe agent hint files with `aichan init-agent-hints`, exchange encrypted private messages, upload and restore hosted encrypted backups, and sync encrypted summary-memory activity snapshots through the relay.
 
 The next architecture layers should be added in this order:
 
