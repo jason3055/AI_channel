@@ -3903,9 +3903,11 @@ fn request_completion_log_value(
     let route = route_template(request.method.as_str(), request.path());
     let component = component_for_route(route);
     let error = response_error_log_fields(response);
+    let slow_threshold_ms = slow_request_threshold_ms(route);
+    let is_slow = slow_threshold_ms.is_some_and(|threshold| latency_ms > u128::from(threshold));
     let mut line = json!({
         "schema_version": 1,
-        "severity": severity_for_status(status),
+        "severity": severity_for_request(status, is_slow),
         "message": if failed { "request failed" } else { "request completed" },
         "event": {
             "name": if failed { "request.failed" } else { "request.completed" },
@@ -3923,6 +3925,18 @@ fn request_completion_log_value(
         "outcome": if failed { "failure" } else { "success" },
         "timestamp": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
     });
+
+    if is_slow {
+        line.as_object_mut()
+            .expect("request log line is an object")
+            .insert(
+                "performance".to_string(),
+                json!({
+                    "slow": true,
+                    "threshold_ms": slow_threshold_ms.expect("slow request has threshold"),
+                }),
+            );
+    }
 
     if let Some(trace) = cloud_trace_id(request) {
         line.as_object_mut()
@@ -3988,6 +4002,27 @@ fn severity_for_status(status: u16) -> &'static str {
         500..=599 => "ERROR",
         400..=499 => "WARNING",
         _ => "INFO",
+    }
+}
+
+fn severity_for_request(status: u16, is_slow: bool) -> &'static str {
+    match severity_for_status(status) {
+        "INFO" if is_slow => "WARNING",
+        severity => severity,
+    }
+}
+
+fn slow_request_threshold_ms(route: &str) -> Option<u64> {
+    match route {
+        "/health" => Some(100),
+        "/agent.json" => Some(250),
+        "/v1/publish" => Some(800),
+        "/v1/publish/search" => Some(1000),
+        "/v1/messages" => Some(1000),
+        "/v1/inbox" => Some(1500),
+        "/v1/activity/sync" => Some(1500),
+        "/v1/backup" => Some(3000),
+        _ => None,
     }
 }
 
@@ -4319,6 +4354,37 @@ mod tests {
         assert_eq!(log["error"]["category"], json!("validation"));
         assert_eq!(log["error"]["retryable"], json!(false));
         assert!(!log.to_string().contains("pub_sensitive_001"));
+    }
+
+    #[test]
+    fn request_completion_log_warns_when_latency_crosses_route_threshold() {
+        let request = HttpRequest::new("GET", "/health");
+        let response = json_response(200, json!({ "ok": true }));
+
+        let fast = request_completion_log_value(&request, &response, 100);
+        assert_eq!(fast["severity"], json!("INFO"));
+        assert!(fast.get("performance").is_none());
+
+        let slow = request_completion_log_value(&request, &response, 101);
+        assert_eq!(slow["severity"], json!("WARNING"));
+        assert_eq!(slow["event"]["name"], json!("request.completed"));
+        assert_eq!(slow["event"]["kind"], json!("performance"));
+        assert_eq!(slow["outcome"], json!("success"));
+        assert_eq!(slow["performance"]["slow"], json!(true));
+        assert_eq!(slow["performance"]["threshold_ms"], json!(100));
+    }
+
+    #[test]
+    fn request_completion_log_keeps_error_severity_for_slow_failures() {
+        let request = HttpRequest::new("GET", "/health");
+        let response = error_response(503, "storage_unavailable", "Storage failed.", true);
+
+        let log = request_completion_log_value(&request, &response, 101);
+
+        assert_eq!(log["severity"], json!("ERROR"));
+        assert_eq!(log["event"]["name"], json!("request.failed"));
+        assert_eq!(log["error"]["code"], json!("storage_unavailable"));
+        assert_eq!(log["performance"]["slow"], json!(true));
     }
 
     #[test]
