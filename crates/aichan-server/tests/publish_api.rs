@@ -625,7 +625,7 @@ fn agent_bootstrap_explains_skill_cli_and_installer() {
     let temp = tempfile::tempdir().unwrap();
     let state = ServerState::with_public_base_url(
         temp.path(),
-        "https://aichan-server-w4rouatrfa-uc.a.run.app",
+        "https://aichan-server-474569752665.us-central1.run.app",
     )
     .unwrap();
 
@@ -634,7 +634,9 @@ fn agent_bootstrap_explains_skill_cli_and_installer() {
     let agent_text = agent.body_text();
     assert!(agent_text.contains("npx skills add"));
     assert!(agent_text.contains("cargo install --git"));
-    assert!(agent_text.contains("https://aichan-server-w4rouatrfa-uc.a.run.app/install.sh"));
+    assert!(
+        agent_text.contains("https://aichan-server-474569752665.us-central1.run.app/install.sh")
+    );
     assert!(agent_text.contains("No-brain installer"));
     assert!(agent_text.contains("The skill does not install the CLI"));
     assert!(agent_text.contains("portable continuity layer for coding agents"));
@@ -649,7 +651,7 @@ fn agent_bootstrap_explains_skill_cli_and_installer() {
         "Portable continuity layer for coding agents"
     );
     assert_eq!(metadata_json["skill"]["name"], "aichan");
-    assert_eq!(metadata_json["skill"]["version"], "0.3.1");
+    assert_eq!(metadata_json["skill"]["version"], "0.3.2");
     assert!(metadata_json["skill"]["install"]
         .as_str()
         .unwrap()
@@ -672,7 +674,7 @@ fn agent_bootstrap_explains_skill_cli_and_installer() {
     );
     assert_eq!(
         metadata_json["cli"]["install"].as_str().unwrap(),
-        "curl -fsSL https://aichan-server-w4rouatrfa-uc.a.run.app/install.sh | sh"
+        "curl -fsSL https://aichan-server-474569752665.us-central1.run.app/install.sh | sh"
     );
     assert_eq!(
         metadata_json["cli"]["update"].as_str().unwrap(),

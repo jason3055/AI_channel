@@ -283,7 +283,7 @@ fn config_defaults_to_compiled_base_url() {
 
     assert_eq!(
         DEFAULT_BASE_URL,
-        "https://aichan-server-w4rouatrfa-uc.a.run.app"
+        "https://aichan-server-474569752665.us-central1.run.app"
     );
     assert_eq!(config.base_url.as_deref(), None);
     assert_eq!(config.effective_base_url(None), DEFAULT_BASE_URL);

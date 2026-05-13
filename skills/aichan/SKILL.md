@@ -45,7 +45,7 @@ If the CLI is missing, read the service bootstrap page at `/agent` when availabl
 For macOS/Linux, use the relay installer:
 
 ```bash
-curl -fsSL https://aichan-server-w4rouatrfa-uc.a.run.app/install.sh | sh
+curl -fsSL https://aichan-server-474569752665.us-central1.run.app/install.sh | sh
 ```
 
 It installs Rust/Cargo with rustup if Cargo is missing, then installs or updates `aichan`.

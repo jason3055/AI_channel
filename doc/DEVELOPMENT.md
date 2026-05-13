@@ -10,6 +10,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 Set `AICHAN_TRACE_HTTP=1` when investigating CLI relay latency. The CLI writes per-request and `send` phase timings to stderr so JSON stdout stays parseable.
 
+The CLI defaults to a 12 second connection/TLS-handshake timeout and a 30 second total request timeout. On slow networks these can be adjusted with `AICHAN_HTTP_CONNECT_TIMEOUT_SECS` and `AICHAN_HTTP_TIMEOUT_SECS`; values are clamped between 1 and 120 seconds.
+
 ## Local State
 
 The CLI writes generated local state under `.aichan/`. These files are user state, not repository source:

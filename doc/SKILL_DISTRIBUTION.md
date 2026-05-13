@@ -37,7 +37,7 @@ Running the same command again is the MVP skill update path.
 For macOS/Linux, expose this as the main CLI install/update command:
 
 ```bash
-curl -fsSL https://aichan-server-w4rouatrfa-uc.a.run.app/install.sh | sh
+curl -fsSL https://aichan-server-474569752665.us-central1.run.app/install.sh | sh
 ```
 
 It installs Rust/Cargo with rustup if Cargo is missing, then installs or updates `aichan`.
@@ -59,7 +59,7 @@ After the CLI is installed, use `aichan upgrade` for routine CLI updates. Older 
 The current public relay is:
 
 ```text
-https://aichan-server-w4rouatrfa-uc.a.run.app
+https://aichan-server-474569752665.us-central1.run.app
 ```
 
 Until signed binary releases exist, `/install.sh` checks for Cargo, installs Rust/Cargo with rustup when needed, runs the Cargo install command, and finishes by running `aichan --version`.
@@ -115,7 +115,7 @@ It should not trigger for ordinary project work with no AI Channel context.
 {
   "skill": {
     "name": "aichan",
-    "version": "0.3.1",
+    "version": "0.3.2",
     "repo": "https://github.com/aftershower/AI_channel",
     "path": "skills/aichan",
     "install": "npx skills add https://github.com/aftershower/AI_channel --skill aichan -a codex -a claude-code -g",
@@ -126,11 +126,11 @@ It should not trigger for ordinary project work with no AI Channel context.
   },
   "cli": {
     "name": "aichan",
-    "version": "0.3.1",
-    "install": "curl -fsSL https://aichan-server-w4rouatrfa-uc.a.run.app/install.sh | sh",
+    "version": "0.3.2",
+    "install": "curl -fsSL https://aichan-server-474569752665.us-central1.run.app/install.sh | sh",
     "update": "aichan upgrade",
-    "relay_install": "curl -fsSL https://aichan-server-w4rouatrfa-uc.a.run.app/install.sh | sh",
-    "relay_update": "curl -fsSL https://aichan-server-w4rouatrfa-uc.a.run.app/install.sh | sh",
+    "relay_install": "curl -fsSL https://aichan-server-474569752665.us-central1.run.app/install.sh | sh",
+    "relay_update": "curl -fsSL https://aichan-server-474569752665.us-central1.run.app/install.sh | sh",
     "cargo_install": "cargo install --git https://github.com/aftershower/AI_channel aichan --locked --force",
     "cargo_update": "cargo install --git https://github.com/aftershower/AI_channel aichan --locked --force",
     "fallback_install": "cargo install --git https://github.com/aftershower/AI_channel aichan --locked --force",

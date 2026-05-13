@@ -28,6 +28,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 const PROJECT_REPO_URL: &str = "https://github.com/aftershower/AI_channel";
+const DEFAULT_RELAY_CONNECT_TIMEOUT_SECS: u64 = 12;
+const DEFAULT_RELAY_REQUEST_TIMEOUT_SECS: u64 = 30;
+const MIN_RELAY_TIMEOUT_SECS: u64 = 1;
+const MAX_RELAY_TIMEOUT_SECS: u64 = 120;
 
 #[derive(Debug, Parser)]
 #[command(name = "aichan", version, about = "AI Channel local CLI")]
@@ -1589,9 +1593,9 @@ fn relay_request(
         request = request.body(body.to_vec());
     }
 
-    let response = request
-        .send()
-        .with_context(|| format!("request {} {}", method.as_str(), url))?;
+    let response = request.send().map_err(|source| {
+        relay_send_error(source, method.as_str(), &url, path, started.elapsed())
+    })?;
     let status = response.status().as_u16();
     let response_body = response
         .bytes()
@@ -1616,13 +1620,46 @@ fn relay_request(
 
 static RELAY_HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RelayHttpTimeouts {
+    connect_timeout: Duration,
+    request_timeout: Duration,
+}
+
+fn default_relay_http_timeouts() -> RelayHttpTimeouts {
+    relay_http_timeouts_from_env(|name| std::env::var(name).ok())
+}
+
+fn relay_http_timeouts_from_env(read_env: impl Fn(&str) -> Option<String>) -> RelayHttpTimeouts {
+    RelayHttpTimeouts {
+        connect_timeout: timeout_from_env(
+            read_env("AICHAN_HTTP_CONNECT_TIMEOUT_SECS"),
+            DEFAULT_RELAY_CONNECT_TIMEOUT_SECS,
+        ),
+        request_timeout: timeout_from_env(
+            read_env("AICHAN_HTTP_TIMEOUT_SECS"),
+            DEFAULT_RELAY_REQUEST_TIMEOUT_SECS,
+        ),
+    }
+}
+
+fn timeout_from_env(value: Option<String>, default_secs: u64) -> Duration {
+    let secs = value
+        .as_deref()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(default_secs)
+        .clamp(MIN_RELAY_TIMEOUT_SECS, MAX_RELAY_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
 fn relay_http_client() -> Result<&'static Client> {
     if let Some(client) = RELAY_HTTP_CLIENT.get() {
         return Ok(client);
     }
+    let timeouts = default_relay_http_timeouts();
     let client = Client::builder()
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(15))
+        .connect_timeout(timeouts.connect_timeout)
+        .timeout(timeouts.request_timeout)
         .user_agent(concat!("aichan/", env!("CARGO_PKG_VERSION")))
         .build()
         .context("build relay HTTP client")?;
@@ -1630,6 +1667,30 @@ fn relay_http_client() -> Result<&'static Client> {
     Ok(RELAY_HTTP_CLIENT
         .get()
         .expect("relay HTTP client was just initialized"))
+}
+
+fn relay_send_error(
+    source: reqwest::Error,
+    method: &str,
+    url: &str,
+    path: &str,
+    elapsed: Duration,
+) -> anyhow::Error {
+    let elapsed_ms = elapsed.as_millis();
+    let mut message = format!("request {method} {url} failed after {elapsed_ms}ms");
+    if source.is_timeout() || source.is_connect() {
+        message
+            .push_str("; connection or TLS handshake timed out before the relay handler responded");
+        if path == "/v1/publish/search?limit=100" {
+            message.push_str(
+                "; send was discovering the recipient key, so a cached or explicit recipient key avoids this lookup",
+            );
+        }
+        message.push_str(
+            "; retry once, set AICHAN_TRACE_HTTP=1 for timings, or increase AICHAN_HTTP_CONNECT_TIMEOUT_SECS on slow networks",
+        );
+    }
+    anyhow!(source).context(message)
 }
 
 fn trace_timing(name: &str, started: Instant, fields: &[(&str, &str)]) {
@@ -1699,5 +1760,13 @@ mod tests {
             path,
             "/v1/discover?limit=3&tags=coding,agent+friends&seed=abc+123"
         );
+    }
+
+    #[test]
+    fn default_relay_http_timeouts_allow_slow_cloud_run_tls_handshake() {
+        let timeouts = default_relay_http_timeouts();
+
+        assert!(timeouts.connect_timeout >= Duration::from_secs(10));
+        assert!(timeouts.request_timeout >= Duration::from_secs(20));
     }
 }
