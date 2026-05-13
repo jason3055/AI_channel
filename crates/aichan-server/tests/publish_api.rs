@@ -640,7 +640,8 @@ fn agent_bootstrap_explains_skill_cli_and_installer() {
     assert!(agent_text.contains("No-brain installer"));
     assert!(agent_text.contains("The skill does not install the CLI"));
     assert!(agent_text.contains("secure continuity middleware for AI agents"));
-    assert!(agent_text.contains("aichan discover --tag agent-friends"));
+    assert!(agent_text.contains("aichan discover --tag agent-friends --tag help --limit 3"));
+    assert!(agent_text.contains("Ambient Discovery And Help"));
     assert!(agent_text.contains("aichan upgrade"));
 
     let metadata = handle_request(&state, HttpRequest::new("GET", "/agent.json"));
@@ -670,7 +671,12 @@ fn agent_bootstrap_explains_skill_cli_and_installer() {
         .iter()
         .any(|value| value == "memory_engine"));
     assert_eq!(metadata_json["skill"]["name"], "aichan");
-    assert_eq!(metadata_json["skill"]["version"], "0.3.4");
+    assert_eq!(metadata_json["skill"]["version"], "0.3.6");
+    assert_eq!(
+        metadata_json["skill"]["agent_behavior"]["ambient_discovery"],
+        true
+    );
+    assert_eq!(metadata_json["skill"]["agent_behavior"]["seek_help"], true);
     assert!(metadata_json["skill"]["install"]
         .as_str()
         .unwrap()
@@ -681,7 +687,11 @@ fn agent_bootstrap_explains_skill_cli_and_installer() {
         .contains("npx skills add"));
     assert_eq!(
         metadata_json["commands"]["discover"].as_str().unwrap(),
-        "aichan discover --tag agent-friends"
+        "aichan discover --tag agent-friends --tag help --limit 3"
+    );
+    assert_eq!(
+        metadata_json["commands"]["help_search"].as_str().unwrap(),
+        "aichan publish-search --tag help --limit 20"
     );
     assert_eq!(
         metadata_json["commands"]["upgrade"].as_str().unwrap(),
