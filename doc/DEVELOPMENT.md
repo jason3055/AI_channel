@@ -8,6 +8,8 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+Set `AICHAN_TRACE_HTTP=1` when investigating CLI relay latency. The CLI writes per-request and `send` phase timings to stderr so JSON stdout stays parseable.
+
 ## Local State
 
 The CLI writes generated local state under `.aichan/`. These files are user state, not repository source:
@@ -17,10 +19,12 @@ The CLI writes generated local state under `.aichan/`. These files are user stat
 - `.aichan/memory.json`
 - `.aichan/config.json`
 - `.aichan/backup.json`
+- `.aichan/recipient-key-cache.json`
 - `.aichan/inbox-cache/`
+- `.aichan/peer-messages/`
 - `.aichan/transcripts/`
 
-Do not commit local state, private keys, recovery phrases, backup plaintext, raw inbox caches, or transcript files.
+Do not commit local state, private keys, recovery phrases, backup plaintext, recipient key caches, raw inbox caches, peer message logs, or transcript files.
 
 ## Planning Work
 

@@ -1,7 +1,7 @@
 use std::io::Write;
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, Stdio};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use aichan_core::protocol::MessageEncryptionKey;
 use aichan_core::protocol::{
@@ -20,6 +20,8 @@ use aichan_core::{
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use clap::{Parser, Subcommand};
+use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Debug, Parser)]
@@ -278,6 +280,7 @@ No private keys are stored in this note.\n";
         ".aichan/device.json",
         ".aichan/memory.json",
         ".aichan/backup.json",
+        ".aichan/recipient-key-cache.json",
         ".aichan/inbox-cache/",
         ".aichan/peer-messages/",
         ".aichan/transcripts/",
@@ -442,17 +445,33 @@ fn publish_delete(state: &LocalStateDir, args: PublishDeleteArgs, json: bool) ->
 
 fn send_message(state: &LocalStateDir, args: SendArgs, json: bool) -> Result<()> {
     let recipient = PeerId::parse(args.recipient_peer_id.clone())?;
-    let (recipient_key_id, recipient_public_key) = match (
+    let key_started = Instant::now();
+    let (recipient_key_id, recipient_public_key, key_source) = match (
         args.recipient_key_id.clone(),
         args.recipient_public_key.clone(),
     ) {
-        (Some(key_id), Some(public_key)) => (key_id, public_key),
+        (Some(key_id), Some(public_key)) => {
+            cache_recipient_message_key(state, &recipient, &key_id, &public_key)?;
+            (key_id, public_key, "explicit")
+        }
         _ => {
-            let config = AichanConfig::load_or_default(state)?;
-            let base_url = config.effective_base_url(args.base_url.as_deref());
-            discover_recipient_message_key(state, base_url, &recipient)?
+            if let Some((key_id, public_key)) = cached_recipient_message_key(state, &recipient)? {
+                (key_id, public_key, "cache")
+            } else {
+                let config = AichanConfig::load_or_default(state)?;
+                let base_url = config.effective_base_url(args.base_url.as_deref());
+                let (key_id, public_key) = discover_recipient_message_key(base_url, &recipient)?;
+                cache_recipient_message_key(state, &recipient, &key_id, &public_key)?;
+                (key_id, public_key, "discovery")
+            }
         }
     };
+    trace_timing(
+        "send.recipient_key",
+        key_started,
+        &[("source", key_source), ("recipient", recipient.as_str())],
+    );
+    let encrypt_started = Instant::now();
     let signed = build_message_envelope(
         state,
         recipient,
@@ -460,6 +479,11 @@ fn send_message(state: &LocalStateDir, args: SendArgs, json: bool) -> Result<()>
         recipient_key_id,
         recipient_public_key,
     )?;
+    trace_timing(
+        "send.encrypt",
+        encrypt_started,
+        &[("message_id", &signed.id)],
+    );
     if args.dry_run {
         print_json_or_compact(&signed, json)?;
         return Ok(());
@@ -468,6 +492,7 @@ fn send_message(state: &LocalStateDir, args: SendArgs, json: bool) -> Result<()>
     let config = AichanConfig::load_or_default(state)?;
     let base_url = config.effective_base_url(args.base_url.as_deref());
     let body = serde_json::to_vec(&signed)?;
+    let post_started = Instant::now();
     let response = relay_request(
         "POST",
         base_url,
@@ -475,6 +500,11 @@ fn send_message(state: &LocalStateDir, args: SendArgs, json: bool) -> Result<()>
         &[("Content-Type", "application/json")],
         &body,
     )?;
+    trace_timing(
+        "send.post_message",
+        post_started,
+        &[("status", &response.status.to_string())],
+    );
     if response.status < 400 {
         append_local_message_log(state, "outbound", &signed.payload.recipient, &signed, false)?;
     }
@@ -804,11 +834,89 @@ fn build_message_envelope(
     unsigned.sign(&signing_key).map_err(Into::into)
 }
 
-fn discover_recipient_message_key(
-    _state: &LocalStateDir,
-    base_url: &str,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RecipientKeyCacheFile {
+    version: u8,
+    #[serde(default)]
+    peers: Vec<CachedRecipientMessageKey>,
+}
+
+impl Default for RecipientKeyCacheFile {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            peers: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedRecipientMessageKey {
+    peer_id: String,
+    suite: String,
+    key_id: String,
+    public_key: String,
+    updated_at: chrono::DateTime<Utc>,
+}
+
+fn cached_recipient_message_key(
+    state: &LocalStateDir,
     recipient: &PeerId,
-) -> Result<(String, String)> {
+) -> Result<Option<(String, String)>> {
+    let path = state.recipient_key_cache_path();
+    if !path.exists() {
+        return Ok(None);
+    }
+    let cache = read_recipient_key_cache(state)?;
+    Ok(cache
+        .peers
+        .iter()
+        .find(|peer| peer.peer_id == recipient.as_str() && peer.suite == MESSAGE_ENCRYPTION_SUITE)
+        .map(|peer| (peer.key_id.clone(), peer.public_key.clone())))
+}
+
+fn cache_recipient_message_key(
+    state: &LocalStateDir,
+    recipient: &PeerId,
+    key_id: &str,
+    public_key: &str,
+) -> Result<()> {
+    state.ensure_dirs()?;
+    let mut cache = read_recipient_key_cache(state).unwrap_or_default();
+    cache.version = 1;
+    cache.peers.retain(|peer| {
+        !(peer.peer_id == recipient.as_str() && peer.suite == MESSAGE_ENCRYPTION_SUITE)
+    });
+    cache.peers.push(CachedRecipientMessageKey {
+        peer_id: recipient.as_str().to_string(),
+        suite: MESSAGE_ENCRYPTION_SUITE.to_string(),
+        key_id: key_id.to_string(),
+        public_key: public_key.to_string(),
+        updated_at: Utc::now(),
+    });
+    let bytes = serde_json::to_vec_pretty(&cache)?;
+    std::fs::write(state.recipient_key_cache_path(), bytes)?;
+    Ok(())
+}
+
+fn read_recipient_key_cache(state: &LocalStateDir) -> Result<RecipientKeyCacheFile> {
+    let path = state.recipient_key_cache_path();
+    if !path.exists() {
+        return Ok(RecipientKeyCacheFile::default());
+    }
+    let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    let cache: RecipientKeyCacheFile =
+        serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+    if cache.version != 1 {
+        return Err(anyhow!(
+            "unsupported recipient key cache version {}",
+            cache.version
+        ));
+    }
+    Ok(cache)
+}
+
+fn discover_recipient_message_key(base_url: &str, recipient: &PeerId) -> Result<(String, String)> {
     let response = relay_request("GET", base_url, "/v1/publish/search?limit=100", &[], &[])?;
     if response.status >= 400 {
         return Err(anyhow!(
@@ -818,6 +926,13 @@ fn discover_recipient_message_key(
         ));
     }
     let value: serde_json::Value = serde_json::from_slice(&response.body)?;
+    extract_recipient_message_key(&value, recipient)
+}
+
+fn extract_recipient_message_key(
+    value: &serde_json::Value,
+    recipient: &PeerId,
+) -> Result<(String, String)> {
     for record in value
         .get("records")
         .and_then(serde_json::Value::as_array)
@@ -946,132 +1061,78 @@ fn relay_request(
     headers: &[(&str, &str)],
     body: &[u8],
 ) -> Result<RelayResponse> {
-    if base_url.starts_with("https://") {
-        return relay_request_with_curl(method, base_url, path, headers, body);
-    }
-    relay_request_with_tcp(method, base_url, path, headers, body)
-}
-
-fn relay_request_with_tcp(
-    method: &str,
-    base_url: &str,
-    path: &str,
-    headers: &[(&str, &str)],
-    body: &[u8],
-) -> Result<RelayResponse> {
-    let target = parse_http_base_url(base_url)?;
-    let mut stream = TcpStream::connect((target.host.as_str(), target.port))
-        .with_context(|| format!("connect to {base_url}"))?;
-    let request_path = format!("{}{}", target.base_path, path);
-    write!(
-        stream,
-        "{method} {request_path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\n",
-        target.host,
-        body.len()
-    )?;
-    for (name, value) in headers {
-        write!(stream, "{name}: {value}\r\n")?;
-    }
-    write!(stream, "\r\n")?;
-    stream.write_all(body)?;
-
-    let mut raw = Vec::new();
-    std::io::Read::read_to_end(&mut stream, &mut raw)?;
-    parse_http_response(&raw)
-}
-
-fn relay_request_with_curl(
-    method: &str,
-    base_url: &str,
-    path: &str,
-    headers: &[(&str, &str)],
-    body: &[u8],
-) -> Result<RelayResponse> {
+    let started = Instant::now();
     let url = format!("{}{}", base_url.trim_end_matches('/'), path);
-    let mut command = ProcessCommand::new("curl");
-    command
-        .arg("-sS")
-        .arg("-X")
-        .arg(method)
-        .arg("-w")
-        .arg("\n__AICHAN_STATUS:%{http_code}")
-        .arg(url);
+    let client = relay_http_client()?;
+    let method = reqwest::Method::from_bytes(method.as_bytes())?;
+    let mut request = client.request(method.clone(), &url);
     for (name, value) in headers {
-        command.arg("-H").arg(format!("{name}: {value}"));
+        request = request.header(*name, *value);
     }
-    if !body.is_empty() || method == "POST" {
-        command.arg("--data-binary").arg("@-").stdin(Stdio::piped());
+    if !body.is_empty() || matches!(method, reqwest::Method::POST | reqwest::Method::PUT) {
+        request = request.body(body.to_vec());
     }
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    let mut child = command.spawn().context("spawn curl")?;
-    if !body.is_empty() || method == "POST" {
-        child
-            .stdin
-            .as_mut()
-            .context("open curl stdin")?
-            .write_all(body)?;
-    }
-    let output = child.wait_with_output().context("wait for curl")?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "curl failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    let output = String::from_utf8(output.stdout).context("curl output was not UTF-8")?;
-    let (body, status) = output
-        .rsplit_once("\n__AICHAN_STATUS:")
-        .context("curl output did not include status marker")?;
-    Ok(RelayResponse {
-        status: status.trim().parse()?,
-        body: body.as_bytes().to_vec(),
-    })
-}
+    let response = request
+        .send()
+        .with_context(|| format!("request {} {}", method.as_str(), url))?;
+    let status = response.status().as_u16();
+    let response_body = response
+        .bytes()
+        .with_context(|| format!("read response {} {}", method.as_str(), url))?
+        .to_vec();
+    trace_timing(
+        "http.request",
+        started,
+        &[
+            ("method", method.as_str()),
+            ("path", path),
+            ("status", &status.to_string()),
+            ("bytes", &response_body.len().to_string()),
+        ],
+    );
 
-#[derive(Debug)]
-struct HttpTarget {
-    host: String,
-    port: u16,
-    base_path: String,
-}
-
-fn parse_http_base_url(base_url: &str) -> Result<HttpTarget> {
-    let rest = base_url
-        .strip_prefix("http://")
-        .ok_or_else(|| anyhow!("MVP TCP client only supports http:// URLs or https:// via curl"))?;
-    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
-    let (host, port) = if let Some((host, port)) = authority.split_once(':') {
-        (host.to_string(), port.parse::<u16>()?)
-    } else {
-        (authority.to_string(), 80)
-    };
-    Ok(HttpTarget {
-        host,
-        port,
-        base_path: if path.is_empty() {
-            String::new()
-        } else {
-            format!("/{path}")
-        },
-    })
-}
-
-fn parse_http_response(raw: &[u8]) -> Result<RelayResponse> {
-    let raw = String::from_utf8_lossy(raw);
-    let (head, body) = raw
-        .split_once("\r\n\r\n")
-        .ok_or_else(|| anyhow!("invalid HTTP response"))?;
-    let status = head
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .ok_or_else(|| anyhow!("missing HTTP status"))?
-        .parse::<u16>()?;
     Ok(RelayResponse {
         status,
-        body: body.as_bytes().to_vec(),
+        body: response_body,
     })
+}
+
+static RELAY_HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
+
+fn relay_http_client() -> Result<&'static Client> {
+    if let Some(client) = RELAY_HTTP_CLIENT.get() {
+        return Ok(client);
+    }
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(15))
+        .user_agent(concat!("aichan/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("build relay HTTP client")?;
+    let _ = RELAY_HTTP_CLIENT.set(client);
+    Ok(RELAY_HTTP_CLIENT
+        .get()
+        .expect("relay HTTP client was just initialized"))
+}
+
+fn trace_timing(name: &str, started: Instant, fields: &[(&str, &str)]) {
+    if !http_trace_enabled() {
+        return;
+    }
+    let mut parts = vec![
+        format!("event={name}"),
+        format!("elapsed_ms={}", started.elapsed().as_millis()),
+    ];
+    parts.extend(fields.iter().map(|(key, value)| format!("{key}={value}")));
+    eprintln!("aichan_trace {}", parts.join(" "));
+}
+
+fn http_trace_enabled() -> bool {
+    matches!(
+        std::env::var("AICHAN_TRACE_HTTP").as_deref(),
+        Ok("1" | "true" | "TRUE" | "yes" | "YES")
+    )
 }
 
 fn query_escape(value: &str) -> String {

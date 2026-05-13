@@ -23,6 +23,10 @@ fn local_state_paths_point_under_dot_aichan() {
         temp.path().join(".aichan/backup.json")
     );
     assert_eq!(
+        state.recipient_key_cache_path(),
+        temp.path().join(".aichan/recipient-key-cache.json")
+    );
+    assert_eq!(
         state.inbox_cache_dir(),
         temp.path().join(".aichan/inbox-cache")
     );

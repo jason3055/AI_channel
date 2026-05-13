@@ -38,6 +38,10 @@ impl LocalStateDir {
         self.root().join("backup.json")
     }
 
+    pub fn recipient_key_cache_path(&self) -> PathBuf {
+        self.root().join("recipient-key-cache.json")
+    }
+
     pub fn inbox_cache_dir(&self) -> PathBuf {
         self.root().join("inbox-cache")
     }
