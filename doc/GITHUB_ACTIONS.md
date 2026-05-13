@@ -4,7 +4,7 @@ AI Channel deploys from `main` by default once the server is actually deployable
 
 ## Current Status
 
-`.github/workflows/deploy.yml` runs Rust verification on every push to `main`.
+`.github/workflows/deploy.yml` starts on every push to `main`, then runs a lightweight changed-path check before doing expensive work.
 
 The deploy job is on by default. It is skipped only when this repository variable is set:
 
@@ -12,7 +12,9 @@ The deploy job is on by default. It is skipped only when this repository variabl
 PAUSE_CLOUD_RUN_DEPLOY=true
 ```
 
-Inside the deploy job, the actual Cloud Run deploy steps run only when a root `Dockerfile` exists and required Google Cloud repository variables are present. If the variables are missing while you are still preparing GCP, the job emits a notice and exits successfully after verification.
+Rust verification runs only when Rust, Docker, workflow, or deploy-relevant source paths changed. Cloud Run deployment runs only when server/deploy-relevant paths changed. Documentation-only pushes such as `README.md` or `doc/**` changes do not rebuild the Docker image and do not deploy Cloud Run. Manual `workflow_dispatch` still forces verification and deployment.
+
+Inside the deploy job, the actual Cloud Run deploy steps also require a root `Dockerfile` and required Google Cloud repository variables. If the variables are missing while you are still preparing GCP, the job emits a notice and exits successfully after verification.
 
 The root `Dockerfile` is now present. Before expecting Cloud Run deploy to run, make sure all of these are true:
 
@@ -26,6 +28,8 @@ The root `Dockerfile` is now present. Before expecting Cloud Run deploy to run, 
 
 ```text
 push to main
+  -> changed-path check
+  -> if only docs/non-code changed, skip Rust verification and Cloud Run deploy
   -> cargo fmt --all -- --check
   -> cargo test --workspace
   -> cargo clippy --workspace --all-targets -- -D warnings
@@ -121,6 +125,10 @@ This keeps runtime permissions smaller than deploy permissions.
 ## Workflow Guardrails
 
 - The deploy job is on by default and can be paused with `PAUSE_CLOUD_RUN_DEPLOY=true`.
+- The changed-path check skips Rust verification and Cloud Run deployment for documentation-only pushes.
+- CLI-only changes run Rust verification but skip Cloud Run deployment.
+- Server/core/Docker/workflow changes run Rust verification and Cloud Run deployment.
+- Manual workflow dispatch forces both verification and Cloud Run deployment.
 - The deploy job checks for a root `Dockerfile` before building. Without a Dockerfile, deploy steps are skipped successfully.
 - The workflow does not grant public access to the Cloud Run service. Configure public access once in Google Cloud, then let deployments preserve it.
 - The workflow uses commit SHA image tags so each deploy points to a specific Git revision.

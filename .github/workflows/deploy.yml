@@ -14,8 +14,26 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Detect deploy-relevant changes
+    runs-on: ubuntu-latest
+    outputs:
+      verify: ${{ steps.detect.outputs.verify }}
+      deploy: ${{ steps.detect.outputs.deploy }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed paths
+        id: detect
+        run: bash .github/scripts/detect-changes.sh "${{ github.event.before }}" "${{ github.sha }}"
+
   verify:
     name: Verify Rust workspace
+    needs: changes
+    if: ${{ needs.changes.outputs.verify == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -37,8 +55,10 @@ jobs:
 
   deploy:
     name: Deploy Cloud Run
-    needs: verify
-    if: ${{ vars.PAUSE_CLOUD_RUN_DEPLOY != 'true' }}
+    needs:
+      - changes
+      - verify
+    if: ${{ always() && vars.PAUSE_CLOUD_RUN_DEPLOY != 'true' && needs.changes.outputs.deploy == 'true' && needs.verify.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
