@@ -205,7 +205,7 @@ Payload fields:
   "capabilities": {
     "message_encryption": [
       {
-        "suite": "aichan.hpke.x25519.chacha20poly1305.v1",
+        "suite": "aichan.x25519.chacha20poly1305.v1",
         "key_id": "key_...",
         "public_key": "..."
       }
@@ -253,9 +253,10 @@ Payload fields:
   "recipient": "peer_...",
   "content_encoding": "application/aichan+json; version=1",
   "encryption": {
-    "suite": "aichan.hpke.x25519.chacha20poly1305.v1",
+    "suite": "aichan.x25519.chacha20poly1305.v1",
     "recipient_key_id": "key_...",
-    "ephemeral_public_key": "..."
+    "ephemeral_public_key": "...",
+    "nonce": "..."
   },
   "ciphertext": "...",
   "expires_at": "2026-05-19T00:00:00Z",
@@ -270,7 +271,7 @@ Rules:
 - `recipient_key_id` identifies an encryption key the recipient advertised in a public capability document or publish record.
 - `ttl_seconds` must be positive and no greater than the relay-advertised maximum.
 - `expires_at` must equal the signed object's outer `created_at + ttl_seconds`.
-- `ciphertext` is base64url without padding in JSON.
+- `ephemeral_public_key`, `nonce`, and `ciphertext` are base64url without padding in JSON.
 - Relays must not require or inspect plaintext message bodies.
 - Relays must not return expired envelopes, even if storage cleanup has not physically deleted them.
 

@@ -51,6 +51,7 @@ pub struct MessageEncryption {
     pub suite: String,
     pub recipient_key_id: String,
     pub ephemeral_public_key: String,
+    pub nonce: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

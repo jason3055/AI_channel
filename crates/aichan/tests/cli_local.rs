@@ -92,6 +92,7 @@ fn init_agent_hints_writes_safe_files_and_gitignore_entries() {
     assert!(gitignore.contains(".aichan/device.json"));
     assert!(gitignore.contains(".aichan/memory.json"));
     assert!(gitignore.contains(".aichan/inbox-cache/"));
+    assert!(gitignore.contains(".aichan/peer-messages/"));
     assert!(gitignore.contains(".aichan/transcripts/"));
     assert!(!agents.contains("private_key"));
     assert!(!readme.contains("private_key"));
@@ -163,6 +164,7 @@ fn init_agent_hints_is_idempotent_for_blocks_and_gitignore() {
         ".aichan/device.json",
         ".aichan/memory.json",
         ".aichan/inbox-cache/",
+        ".aichan/peer-messages/",
         ".aichan/transcripts/",
     ] {
         assert_eq!(gitignore.lines().filter(|line| *line == entry).count(), 1);

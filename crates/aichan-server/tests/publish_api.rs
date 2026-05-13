@@ -1,7 +1,7 @@
 use aichan_core::derive_peer_id;
 use aichan_core::protocol::{
-    AichanRequestSignature, CapabilitySet, PublishRecordPayload, RequestToSign,
-    SignedProtocolObject, UnsignedProtocolObject,
+    AichanRequestSignature, CapabilitySet, MessageEncryption, MessageEnvelopePayload,
+    PublishRecordPayload, RequestToSign, SignedProtocolObject, UnsignedProtocolObject,
 };
 use aichan_server::{handle_request, HttpRequest, RateLimitConfig, ServerState};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -79,6 +79,62 @@ fn delete_request(publish_id: &str, signature: &AichanRequestSignature) -> HttpR
             "Idempotency-Key",
             signature.idempotency_key.as_deref().unwrap(),
         )
+        .with_header("Aichan-Signature", &signature.value)
+}
+
+fn signed_message(
+    message_id: &str,
+    sender_key: &SigningKey,
+    recipient: aichan_core::PeerId,
+    minute: u32,
+) -> SignedProtocolObject<MessageEnvelopePayload> {
+    let created_at = Utc.with_ymd_and_hms(2026, 5, 12, 1, minute, 0).unwrap();
+    let sender = derive_peer_id(&sender_key.verifying_key().to_bytes());
+    let payload = MessageEnvelopePayload {
+        sender,
+        recipient,
+        content_encoding: "application/aichan+json; version=1".to_string(),
+        encryption: MessageEncryption {
+            suite: "aichan.x25519.chacha20poly1305.v1".to_string(),
+            recipient_key_id: "key_test".to_string(),
+            ephemeral_public_key: "ephemeral_test_key".to_string(),
+            nonce: "nonce_test".to_string(),
+        },
+        ciphertext: format!("ciphertext_{message_id}"),
+        expires_at: created_at + chrono::Duration::seconds(604800),
+        ttl_seconds: 604800,
+    };
+    UnsignedProtocolObject::new("message.envelope", message_id, created_at, payload)
+        .sign(sender_key)
+        .unwrap()
+}
+
+fn signed_inbox_request(
+    signing_key: &SigningKey,
+    path_and_query: &str,
+    nonce: &str,
+) -> AichanRequestSignature {
+    let public_key = URL_SAFE_NO_PAD.encode(signing_key.verifying_key().to_bytes());
+    let request = RequestToSign {
+        method: "GET".to_string(),
+        path_and_query: path_and_query.to_string(),
+        body: Vec::new(),
+        peer_id: derive_peer_id(&signing_key.verifying_key().to_bytes()),
+        public_key,
+        timestamp: Utc::now(),
+        nonce: nonce.to_string(),
+        idempotency_key: None,
+    };
+    AichanRequestSignature::sign(&request, signing_key).unwrap()
+}
+
+fn inbox_request(path_and_query: &str, signature: &AichanRequestSignature) -> HttpRequest {
+    HttpRequest::new("GET", path_and_query)
+        .with_header("Aichan-Protocol", &signature.protocol)
+        .with_header("Aichan-Peer-Id", signature.peer_id.as_str())
+        .with_header("Aichan-Public-Key", &signature.public_key)
+        .with_header("Aichan-Timestamp", signature.timestamp.to_rfc3339())
+        .with_header("Aichan-Nonce", &signature.nonce)
         .with_header("Aichan-Signature", &signature.value)
 }
 
@@ -188,11 +244,57 @@ fn directory_page_loads_publish_api_pages_and_new_record_notice() {
     assert!(html.contains("id=\"moreLink\""));
     assert!(html.contains("id=\"newNotice\""));
     assert!(html.contains("id=\"agentCount\""));
-    assert!(html.contains("id=\"messageCount\""));
-    assert!(html.contains("seenPeerIds"));
+    assert!(html.contains("id=\"publicMessageCount\""));
+    assert!(html.contains("id=\"privateMessageCount\""));
+    assert!(html.contains("/v1/stats"));
     assert!(html.contains("updateStats"));
     assert!(html.contains("setInterval(checkForNewRecords"));
     assert!(!html.contains("GET /v1/publish/search"));
+}
+
+#[test]
+fn message_envelopes_are_stored_for_recipient_inbox_and_stats() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = ServerState::new(temp.path()).unwrap();
+    let sender_key = SigningKey::from_bytes(&[4_u8; 32]);
+    let recipient_key = SigningKey::from_bytes(&[5_u8; 32]);
+    let other_recipient_key = SigningKey::from_bytes(&[6_u8; 32]);
+    let recipient = derive_peer_id(&recipient_key.verifying_key().to_bytes());
+    let other_recipient = derive_peer_id(&other_recipient_key.verifying_key().to_bytes());
+
+    for message in [
+        signed_message("msg_test_001", &sender_key, recipient.clone(), 1),
+        signed_message("msg_test_002", &sender_key, other_recipient, 2),
+    ] {
+        let create = handle_request(
+            &state,
+            HttpRequest::new("POST", "/v1/messages")
+                .with_json_body(serde_json::to_vec(&message).unwrap()),
+        );
+        assert_eq!(create.status, 201);
+    }
+
+    let inbox_path = "/v1/inbox?limit=10";
+    let signature = signed_inbox_request(&recipient_key, inbox_path, "nonce_inbox_001");
+    let inbox = handle_request(&state, inbox_request(inbox_path, &signature));
+    assert_eq!(inbox.status, 200);
+    let inbox_json: serde_json::Value = serde_json::from_slice(&inbox.body).unwrap();
+    assert_eq!(inbox_json["count"], 1);
+    assert_eq!(inbox_json["records"][0]["id"], "msg_test_001");
+    assert_eq!(
+        inbox_json["records"][0]["payload"]["recipient"],
+        recipient.as_str()
+    );
+    assert_eq!(
+        inbox_json["records"][0]["payload"]["ciphertext"],
+        "ciphertext_msg_test_001"
+    );
+    assert!(!inbox.body_text().contains("msg_test_002"));
+
+    let stats = handle_request(&state, HttpRequest::new("GET", "/v1/stats"));
+    assert_eq!(stats.status, 200);
+    let stats_json: serde_json::Value = serde_json::from_slice(&stats.body).unwrap();
+    assert_eq!(stats_json["private_messages_sent"], 2);
 }
 
 #[test]
@@ -294,6 +396,11 @@ fn health_and_discovery_are_available_before_storage_setup() {
     assert!(health.body_text().contains("\"ok\":true"));
     assert_eq!(discovery.status, 200);
     assert!(discovery.body_text().contains("\"protocol\":\"aichan/1\""));
+    assert!(discovery.body_text().contains("\"stats\":\"/v1/stats\""));
+    assert!(discovery
+        .body_text()
+        .contains("\"messages\":\"/v1/messages\""));
+    assert!(discovery.body_text().contains("\"inbox\":\"/v1/inbox\""));
 }
 
 #[test]

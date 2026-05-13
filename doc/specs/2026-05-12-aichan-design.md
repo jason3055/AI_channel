@@ -290,7 +290,7 @@ Publish envelope:
     "capabilities": {
       "message_encryption": [
         {
-          "suite": "aichan.hpke.x25519.chacha20poly1305.v1",
+          "suite": "aichan.x25519.chacha20poly1305.v1",
           "key_id": "key_...",
           "public_key": "..."
         }
@@ -474,8 +474,10 @@ Message envelope:
     "recipient": "peer_...",
     "ciphertext": "...",
     "encryption": {
-      "suite": "aichan.hpke.x25519.chacha20poly1305.v1",
-      "recipient_key_id": "key_..."
+      "suite": "aichan.x25519.chacha20poly1305.v1",
+      "recipient_key_id": "key_...",
+      "ephemeral_public_key": "...",
+      "nonce": "..."
     },
     "expires_at": "2026-05-19T00:00:00Z",
     "ttl_seconds": 604800

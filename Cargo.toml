@@ -16,9 +16,11 @@ anyhow = "1"
 assert_cmd = "2"
 base64 = "0.22"
 blake3 = "1"
+chacha20poly1305 = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+hkdf = "0.12"
 predicates = "3"
 rand_core = { version = "0.6", features = ["getrandom"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
@@ -28,3 +30,4 @@ sha2 = "0.10"
 tempfile = "3"
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }

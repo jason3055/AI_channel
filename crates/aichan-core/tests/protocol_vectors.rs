@@ -55,7 +55,7 @@ fn publish_record_vector_signs_verifies_and_detects_tampering() {
         contact_policy: "encrypted_messages".to_string(),
         capabilities: CapabilitySet {
             message_encryption: vec![MessageEncryptionKey {
-                suite: "aichan.hpke.x25519.chacha20poly1305.v1".to_string(),
+                suite: "aichan.x25519.chacha20poly1305.v1".to_string(),
                 key_id: "key_test".to_string(),
                 public_key: "x25519_test_public_key".to_string(),
             }],
@@ -71,7 +71,7 @@ fn publish_record_vector_signs_verifies_and_detects_tampering() {
     assert_eq!(
         canonical,
         format!(
-            r#"{{"created_at":"2026-05-12T00:00:00Z","extensions":[],"id":"pub_vector_001","payload":{{"body":"I am an AI agent looking for peers.","capabilities":{{"message_encryption":[{{"key_id":"key_test","public_key":"x25519_test_public_key","suite":"aichan.hpke.x25519.chacha20poly1305.v1"}}]}},"contact_policy":"encrypted_messages","peer_id":"{}","public_key":"{}","tags":["agent-friends","coding"],"updated_at":"2026-05-12T00:00:00Z"}},"protocol":"aichan/1","type":"publish.record"}}"#,
+            r#"{{"created_at":"2026-05-12T00:00:00Z","extensions":[],"id":"pub_vector_001","payload":{{"body":"I am an AI agent looking for peers.","capabilities":{{"message_encryption":[{{"key_id":"key_test","public_key":"x25519_test_public_key","suite":"aichan.x25519.chacha20poly1305.v1"}}]}},"contact_policy":"encrypted_messages","peer_id":"{}","public_key":"{}","tags":["agent-friends","coding"],"updated_at":"2026-05-12T00:00:00Z"}},"protocol":"aichan/1","type":"publish.record"}}"#,
             peer_id, public_key
         )
     );
@@ -83,7 +83,7 @@ fn publish_record_vector_signs_verifies_and_detects_tampering() {
     assert_eq!(signed.signature.public_key, public_key);
     assert_eq!(
         signed.signature.value,
-        "XAyyVX9hlqCECXgQZIXa2ymg4mpScEoRn_hAAt0jBwDfBpPhLjyvFBuSjNYDqhCvRecVmwnZXV9ffiKsz8SkDA"
+        "8M8kn7hSwYvvfwvZek6CwHeJGUcbNRRZyYG3OhOlX1gJxqLKh_sPdm5WgFmn-N8iso6xqXuPstLR_BvUl6EhBg"
     );
     assert_eq!(signed.verify_publish_record().unwrap(), peer_id);
 
@@ -171,7 +171,7 @@ fn documented_core_vector_is_valid_json() {
     assert_eq!(fixture["peer_id"], "peer_g1Ya2zmP2H-OftgzG_8vy5RX");
     assert_eq!(
         fixture["publish_record"]["signature_value"],
-        "XAyyVX9hlqCECXgQZIXa2ymg4mpScEoRn_hAAt0jBwDfBpPhLjyvFBuSjNYDqhCvRecVmwnZXV9ffiKsz8SkDA"
+        "8M8kn7hSwYvvfwvZek6CwHeJGUcbNRRZyYG3OhOlX1gJxqLKh_sPdm5WgFmn-N8iso6xqXuPstLR_BvUl6EhBg"
     );
     assert_eq!(
         fixture["request_signature"]["signature_value"],

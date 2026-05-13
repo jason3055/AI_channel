@@ -3,11 +3,18 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 
+use aichan_core::protocol::MessageEncryptionKey;
 use aichan_core::protocol::{
-    AichanRequestSignature, CapabilitySet, PublishRecordPayload, RequestToSign,
-    SignedProtocolObject, UnsignedProtocolObject,
+    AichanRequestSignature, CapabilitySet, MessageEncryption, MessageEnvelopePayload,
+    PublishRecordPayload, RequestToSign, SignedProtocolObject, UnsignedProtocolObject,
 };
-use aichan_core::{AichanConfig, DeviceFile, IdentityFile, LocalStateDir, MemoryFile};
+use aichan_core::{
+    message_crypto::{
+        decrypt_private_message, encrypt_private_message, message_encryption_aad,
+        SealedPrivateMessage, MESSAGE_ENCRYPTION_SUITE,
+    },
+    AichanConfig, DeviceFile, IdentityFile, LocalStateDir, MemoryFile, PeerId,
+};
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use clap::{Parser, Subcommand};
@@ -47,6 +54,12 @@ enum Command {
 
     /// Delete one of your signed public publish records.
     PublishDelete(PublishDeleteArgs),
+
+    /// Send an encrypted private message envelope.
+    Send(SendArgs),
+
+    /// Fetch and decrypt encrypted private messages for this identity.
+    Inbox(InboxArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -92,6 +105,42 @@ struct PublishDeleteArgs {
     base_url: Option<String>,
 }
 
+#[derive(Debug, Parser)]
+struct SendArgs {
+    /// Recipient peer id.
+    recipient_peer_id: String,
+
+    /// Private message body. It is encrypted before sending.
+    body: String,
+
+    /// Recipient message encryption key id. If omitted, the CLI discovers it from public records.
+    #[arg(long)]
+    recipient_key_id: Option<String>,
+
+    /// Recipient message encryption public key. If omitted, the CLI discovers it from public records.
+    #[arg(long)]
+    recipient_public_key: Option<String>,
+
+    /// Relay base URL. Defaults to config or compiled default.
+    #[arg(long)]
+    base_url: Option<String>,
+
+    /// Print the signed message envelope without sending it.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Parser)]
+struct InboxArgs {
+    /// Maximum messages to fetch.
+    #[arg(long, default_value_t = 50)]
+    limit: usize,
+
+    /// Relay base URL. Defaults to config or compiled default.
+    #[arg(long)]
+    base_url: Option<String>,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let project_dir = match cli.project_dir {
@@ -107,6 +156,8 @@ fn main() -> Result<()> {
         Command::Publish(args) => publish(&state, args, cli.json),
         Command::PublishSearch(args) => publish_search(&state, args, cli.json),
         Command::PublishDelete(args) => publish_delete(&state, args, cli.json),
+        Command::Send(args) => send_message(&state, args, cli.json),
+        Command::Inbox(args) => inbox(&state, args, cli.json),
     }
 }
 
@@ -164,6 +215,7 @@ No private keys are stored in this note.\n";
         ".aichan/memory.json",
         ".aichan/backup.json",
         ".aichan/inbox-cache/",
+        ".aichan/peer-messages/",
         ".aichan/transcripts/",
     ];
     let mut gitignore = if gitignore_path.exists() {
@@ -316,12 +368,280 @@ fn publish_delete(state: &LocalStateDir, args: PublishDeleteArgs, json: bool) ->
     print_relay_response(response, json)
 }
 
+fn send_message(state: &LocalStateDir, args: SendArgs, json: bool) -> Result<()> {
+    let recipient = PeerId::parse(args.recipient_peer_id.clone())?;
+    let (recipient_key_id, recipient_public_key) = match (
+        args.recipient_key_id.clone(),
+        args.recipient_public_key.clone(),
+    ) {
+        (Some(key_id), Some(public_key)) => (key_id, public_key),
+        _ => {
+            let config = AichanConfig::load_or_default(state)?;
+            let base_url = config.effective_base_url(args.base_url.as_deref());
+            discover_recipient_message_key(state, base_url, &recipient)?
+        }
+    };
+    let signed = build_message_envelope(
+        state,
+        recipient,
+        args.body,
+        recipient_key_id,
+        recipient_public_key,
+    )?;
+    if args.dry_run {
+        print_json_or_compact(&signed, json)?;
+        return Ok(());
+    }
+
+    let config = AichanConfig::load_or_default(state)?;
+    let base_url = config.effective_base_url(args.base_url.as_deref());
+    let body = serde_json::to_vec(&signed)?;
+    let response = relay_request(
+        "POST",
+        base_url,
+        "/v1/messages",
+        &[("Content-Type", "application/json")],
+        &body,
+    )?;
+    if response.status < 400 {
+        append_local_message_log(state, "outbound", &signed.payload.recipient, &signed, false)?;
+    }
+    print_relay_response(response, json)
+}
+
+fn inbox(state: &LocalStateDir, args: InboxArgs, json: bool) -> Result<()> {
+    let identity = IdentityFile::create_or_load(state)?;
+    let message_keys = identity.message_key_pair()?;
+    let signing_key = identity.signing_key()?;
+    let config = AichanConfig::load_or_default(state)?;
+    let base_url = config.effective_base_url(args.base_url.as_deref());
+    let path = format!("/v1/inbox?limit={}", args.limit.clamp(1, 100));
+    let request = RequestToSign {
+        method: "GET".to_string(),
+        path_and_query: path.clone(),
+        body: Vec::new(),
+        peer_id: identity.peer_id.clone(),
+        public_key: identity.public_key.clone(),
+        timestamp: Utc::now(),
+        nonce: format!("nonce_{}", Uuid::new_v4().simple()),
+        idempotency_key: None,
+    };
+    let signature = AichanRequestSignature::sign(&request, &signing_key)?;
+    let timestamp = signature.timestamp.to_rfc3339();
+    let headers = [
+        ("Aichan-Protocol", signature.protocol.as_str()),
+        ("Aichan-Peer-Id", signature.peer_id.as_str()),
+        ("Aichan-Public-Key", signature.public_key.as_str()),
+        ("Aichan-Timestamp", timestamp.as_str()),
+        ("Aichan-Nonce", signature.nonce.as_str()),
+        ("Aichan-Signature", signature.value.as_str()),
+    ];
+    let response = relay_request("GET", base_url, &path, &headers, &[])?;
+    if response.status >= 400 {
+        return print_relay_response(response, json);
+    }
+
+    let value: serde_json::Value = serde_json::from_slice(&response.body)?;
+    let mut messages = Vec::new();
+    for record in value
+        .get("records")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let signed: SignedProtocolObject<MessageEnvelopePayload> =
+            serde_json::from_value(record.clone())?;
+        let cache_path = state.inbox_cache_dir().join(format!("{}.json", signed.id));
+        if cache_path.exists() {
+            continue;
+        }
+        let sealed = SealedPrivateMessage {
+            suite: signed.payload.encryption.suite.clone(),
+            recipient_key_id: signed.payload.encryption.recipient_key_id.clone(),
+            ephemeral_public_key: signed.payload.encryption.ephemeral_public_key.clone(),
+            nonce: signed.payload.encryption.nonce.clone(),
+            ciphertext: signed.payload.ciphertext.clone(),
+        };
+        let aad = message_encryption_aad(
+            &signed.id,
+            signed.payload.sender.as_str(),
+            signed.payload.recipient.as_str(),
+            &signed.created_at.to_rfc3339(),
+        );
+        let plaintext = decrypt_private_message(&message_keys, &sealed, &aad)?;
+        let plaintext_json: serde_json::Value = serde_json::from_slice(&plaintext)?;
+        let body = plaintext_json
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        state.ensure_dirs()?;
+        std::fs::write(&cache_path, serde_json::to_vec_pretty(&signed)?)?;
+        append_local_message_log(state, "inbound", &signed.payload.sender, &signed, false)?;
+        messages.push(serde_json::json!({
+            "id": signed.id,
+            "sender": signed.payload.sender,
+            "recipient": signed.payload.recipient,
+            "created_at": signed.created_at,
+            "body": body,
+        }));
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "count": messages.len(),
+                "messages": messages,
+            }))?
+        );
+    } else if messages.is_empty() {
+        println!("no new messages");
+    } else {
+        for message in messages {
+            println!(
+                "{} {}: {}",
+                message["created_at"].as_str().unwrap_or(""),
+                message["sender"].as_str().unwrap_or("unknown"),
+                message["body"].as_str().unwrap_or("")
+            );
+        }
+    }
+    Ok(())
+}
+
+fn append_local_message_log(
+    state: &LocalStateDir,
+    direction: &str,
+    peer_id: &PeerId,
+    signed: &SignedProtocolObject<MessageEnvelopePayload>,
+    plaintext_stored: bool,
+) -> Result<()> {
+    state.ensure_dirs()?;
+    let path = state.peer_messages_path(peer_id.as_str());
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    let entry = serde_json::json!({
+        "version": 1,
+        "direction": direction,
+        "peer_id": peer_id,
+        "message_id": signed.id,
+        "created_at": signed.created_at,
+        "plaintext_stored": plaintext_stored,
+        "envelope": signed,
+    });
+    serde_json::to_writer(&mut file, &entry)?;
+    writeln!(file)?;
+    Ok(())
+}
+
+fn build_message_envelope(
+    state: &LocalStateDir,
+    recipient: PeerId,
+    body: String,
+    recipient_key_id: String,
+    recipient_public_key: String,
+) -> Result<SignedProtocolObject<MessageEnvelopePayload>> {
+    let identity = IdentityFile::create_or_load(state)?;
+    let signing_key = identity.signing_key()?;
+    let now = Utc::now();
+    let message_id = format!("msg_{}", Uuid::new_v4().simple());
+    let plaintext = serde_json::to_vec(&serde_json::json!({
+        "version": 1,
+        "body": body,
+        "sent_at": now,
+    }))?;
+    let aad = message_encryption_aad(
+        &message_id,
+        identity.peer_id.as_str(),
+        recipient.as_str(),
+        &now.to_rfc3339(),
+    );
+    let sealed =
+        encrypt_private_message(&recipient_public_key, &recipient_key_id, &plaintext, &aad)?;
+    let payload = MessageEnvelopePayload {
+        sender: identity.peer_id,
+        recipient,
+        content_encoding: "application/aichan+json; version=1".to_string(),
+        encryption: MessageEncryption {
+            suite: sealed.suite,
+            recipient_key_id: sealed.recipient_key_id,
+            ephemeral_public_key: sealed.ephemeral_public_key,
+            nonce: sealed.nonce,
+        },
+        ciphertext: sealed.ciphertext,
+        expires_at: now + chrono::Duration::seconds(604800),
+        ttl_seconds: 604800,
+    };
+    let unsigned = UnsignedProtocolObject::new("message.envelope", message_id, now, payload);
+    unsigned.sign(&signing_key).map_err(Into::into)
+}
+
+fn discover_recipient_message_key(
+    _state: &LocalStateDir,
+    base_url: &str,
+    recipient: &PeerId,
+) -> Result<(String, String)> {
+    let response = relay_request("GET", base_url, "/v1/publish/search?limit=100", &[], &[])?;
+    if response.status >= 400 {
+        return Err(anyhow!(
+            "relay returned HTTP {} while discovering recipient: {}",
+            response.status,
+            response.body_text()
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&response.body)?;
+    for record in value
+        .get("records")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if record
+            .pointer("/payload/peer_id")
+            .and_then(serde_json::Value::as_str)
+            != Some(recipient.as_str())
+        {
+            continue;
+        }
+        if let Some(key) = record
+            .pointer("/payload/capabilities/message_encryption")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|keys| {
+                keys.iter().find(|key| {
+                    key.get("suite").and_then(serde_json::Value::as_str)
+                        == Some(MESSAGE_ENCRYPTION_SUITE)
+                })
+            })
+        {
+            let key_id = key
+                .get("key_id")
+                .and_then(serde_json::Value::as_str)
+                .context("recipient message key missing key_id")?;
+            let public_key = key
+                .get("public_key")
+                .and_then(serde_json::Value::as_str)
+                .context("recipient message key missing public_key")?;
+            return Ok((key_id.to_string(), public_key.to_string()));
+        }
+    }
+
+    Err(anyhow!(
+        "could not find message encryption key for recipient {}",
+        recipient
+    ))
+}
+
 fn build_publish_record(
     state: &LocalStateDir,
     body: String,
     tags: Vec<String>,
 ) -> Result<SignedProtocolObject<PublishRecordPayload>> {
     let identity = IdentityFile::create_or_load(state)?;
+    let message_keys = identity.message_key_pair()?;
     let signing_key = identity.signing_key()?;
     let now = Utc::now();
     let payload = PublishRecordPayload {
@@ -329,7 +649,13 @@ fn build_publish_record(
         public_key: identity.public_key,
         tags: normalize_tags(tags),
         contact_policy: "encrypted_messages".to_string(),
-        capabilities: CapabilitySet::default(),
+        capabilities: CapabilitySet {
+            message_encryption: vec![MessageEncryptionKey {
+                suite: MESSAGE_ENCRYPTION_SUITE.to_string(),
+                key_id: message_keys.key_id().to_string(),
+                public_key: message_keys.public_key().to_string(),
+            }],
+        },
         body,
         updated_at: now,
     };

@@ -23,7 +23,7 @@ fn main() {
         contact_policy: "encrypted_messages".to_string(),
         capabilities: CapabilitySet {
             message_encryption: vec![MessageEncryptionKey {
-                suite: "aichan.hpke.x25519.chacha20poly1305.v1".to_string(),
+                suite: "aichan.x25519.chacha20poly1305.v1".to_string(),
                 key_id: "key_test".to_string(),
                 public_key: "x25519_test_public_key".to_string(),
             }],

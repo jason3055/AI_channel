@@ -27,6 +27,10 @@ fn local_state_paths_point_under_dot_aichan() {
         temp.path().join(".aichan/inbox-cache")
     );
     assert_eq!(
+        state.peer_messages_path("peer_example"),
+        temp.path().join(".aichan/peer-messages/peer_example.jsonl")
+    );
+    assert_eq!(
         state.transcripts_dir(),
         temp.path().join(".aichan/transcripts")
     );
@@ -41,6 +45,7 @@ fn ensure_dirs_creates_root_and_cache_dirs() {
 
     assert!(state.root().is_dir());
     assert!(state.inbox_cache_dir().is_dir());
+    assert!(state.peer_messages_dir().is_dir());
     assert!(!state.transcripts_dir().exists());
 }
 
@@ -66,7 +71,11 @@ fn identity_create_or_load_reuses_existing_identity() {
     assert_eq!(first.peer_id, second.peer_id);
     assert_eq!(first.public_key, second.public_key);
     assert_eq!(first.private_key, second.private_key);
+    assert_eq!(first.message_public_key, second.message_public_key);
+    assert_eq!(first.message_private_key, second.message_private_key);
+    assert_eq!(first.message_key_id, second.message_key_id);
     assert!(!first.private_key_encrypted);
+    first.message_key_pair().unwrap();
 }
 
 #[test]
@@ -79,6 +88,40 @@ fn identity_exposes_signing_key_that_matches_public_key() {
     let public_key = URL_SAFE_NO_PAD.encode(signing_key.verifying_key().to_bytes());
 
     assert_eq!(public_key, identity.public_key);
+}
+
+#[test]
+fn identity_create_or_load_migrates_missing_message_key_pair() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = LocalStateDir::new(temp.path());
+    let identity = IdentityFile::create_or_load(&state).unwrap();
+    let path = state.identity_path();
+    let mut old_identity: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    old_identity
+        .as_object_mut()
+        .unwrap()
+        .remove("message_key_id");
+    old_identity
+        .as_object_mut()
+        .unwrap()
+        .remove("message_public_key");
+    old_identity
+        .as_object_mut()
+        .unwrap()
+        .remove("message_private_key");
+    std::fs::write(&path, serde_json::to_vec_pretty(&old_identity).unwrap()).unwrap();
+
+    let migrated = IdentityFile::create_or_load(&state).unwrap();
+    let migrated_file: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+
+    assert_eq!(migrated.peer_id, identity.peer_id);
+    assert!(migrated.message_key_id.is_some());
+    assert!(migrated.message_public_key.is_some());
+    assert!(migrated.message_private_key.is_some());
+    migrated.message_key_pair().unwrap();
+    assert!(migrated_file.get("message_public_key").is_some());
 }
 
 #[test]

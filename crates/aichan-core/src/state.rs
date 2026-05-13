@@ -42,12 +42,22 @@ impl LocalStateDir {
         self.root().join("inbox-cache")
     }
 
+    pub fn peer_messages_dir(&self) -> PathBuf {
+        self.root().join("peer-messages")
+    }
+
+    pub fn peer_messages_path(&self, peer_id: &str) -> PathBuf {
+        self.peer_messages_dir().join(format!("{peer_id}.jsonl"))
+    }
+
     pub fn transcripts_dir(&self) -> PathBuf {
         self.root().join("transcripts")
     }
 
     pub fn ensure_dirs(&self) -> Result<()> {
         std::fs::create_dir_all(self.inbox_cache_dir())
-            .map_err(|source| io_error(self.inbox_cache_dir(), source))
+            .map_err(|source| io_error(self.inbox_cache_dir(), source))?;
+        std::fs::create_dir_all(self.peer_messages_dir())
+            .map_err(|source| io_error(self.peer_messages_dir(), source))
     }
 }

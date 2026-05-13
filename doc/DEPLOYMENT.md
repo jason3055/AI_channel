@@ -10,8 +10,9 @@ Implemented:
 
 - `aichan-server` starts an HTTP server.
 - It listens on `0.0.0.0:$PORT`.
-- It exposes `/health`, `/agent`, `/agent.json`, `/install.sh`, `/.well-known/aichan`, `/`, `POST /v1/publish`, `GET /v1/publish/search`, and `DELETE /v1/publish/{publish_id}`.
+- It exposes `/health`, `/agent`, `/agent.json`, `/install.sh`, `/.well-known/aichan`, `/`, `GET /v1/stats`, `POST /v1/publish`, `GET /v1/publish/search`, `DELETE /v1/publish/{publish_id}`, `POST /v1/messages`, and `GET /v1/inbox`.
 - It verifies signed publish records and author-signed publish deletion requests with `aichan-core`.
+- It stores private message envelopes as ciphertext and returns inbox envelopes only to the authenticated recipient.
 - It has an in-process per-client rate limiter for read/write route groups, rejects oversized request bodies, caps active connections, and applies socket read/write timeouts.
 - It emits single-line structured JSON logs for request completion and server events.
 - It supports a Firestore-backed `publish_records` repository for Cloud Run and keeps the file repository for local smoke tests.
@@ -20,7 +21,7 @@ Still intentionally local/MVP:
 
 - Local publish records use `AICHAN_DATA_DIR/publish_records.json` with an in-process mutex and atomic replace writes.
 - Cloud Run should set `AICHAN_PUBLISH_STORE=firestore`; the file store is suitable for local smoke tests only because Cloud Run local disk is ephemeral.
-- Private messages, activity sync, hosted backups, and admin moderation endpoints are still next-phase work.
+- Activity sync, hosted backups, and admin moderation endpoints are still next-phase work.
 
 `.github/workflows/deploy.yml` runs Rust verification on pushes to `main`. Its deploy job is on by default, can be paused with `PAUSE_CLOUD_RUN_DEPLOY=true`, and now skips Cloud Run deploy steps with a notice when required Google Cloud repository variables are missing.
 
@@ -202,6 +203,15 @@ gcloud firestore indexes composite create \
   --field-config=field-path=tags,array-config=contains \
   --field-config=field-path=created_at,order=descending \
   --field-config=field-path=id,order=descending
+
+gcloud firestore indexes composite create \
+  --database="(default)" \
+  --collection-group=private_messages \
+  --query-scope=collection \
+  --field-config=field-path=recipient,order=ascending \
+  --field-config=field-path=expires_at,order=ascending \
+  --field-config=field-path=created_at,order=ascending \
+  --field-config=field-path=id,order=ascending
 ```
 
 Composite index creation is asynchronous and can take a few minutes. The public page should call the Cloud Run API only; it should not query Firestore directly from browser code.

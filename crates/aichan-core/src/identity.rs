@@ -6,8 +6,10 @@ use chrono::{DateTime, Utc};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::error::{io_error, json_error, AichanError, Result};
+use crate::message_crypto::MessageKeyPair;
 use crate::state::LocalStateDir;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +44,12 @@ pub struct IdentityFile {
     pub public_key: String,
     pub private_key: String,
     pub private_key_encrypted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_key_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_public_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_private_key: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -55,7 +63,11 @@ impl IdentityFile {
     pub fn create_or_load(state: &LocalStateDir) -> Result<Self> {
         let path = state.identity_path();
         if path.exists() {
-            return Self::read_from(&path);
+            let mut identity = Self::read_from(&path)?;
+            if identity.ensure_message_key_pair() {
+                identity.write_replace(&path)?;
+            }
+            return Ok(identity);
         }
 
         state.ensure_dirs()?;
@@ -65,12 +77,16 @@ impl IdentityFile {
         let public_bytes = verifying_key.to_bytes();
         let private_bytes = signing_key.to_bytes();
 
+        let message_keys = MessageKeyPair::generate(format!("key_{}", Uuid::new_v4().simple()));
         let identity = Self {
             version: 1,
             peer_id: derive_peer_id(&public_bytes),
             public_key: URL_SAFE_NO_PAD.encode(public_bytes),
             private_key: URL_SAFE_NO_PAD.encode(private_bytes),
             private_key_encrypted: false,
+            message_key_id: Some(message_keys.key_id().to_string()),
+            message_public_key: Some(message_keys.public_key().to_string()),
+            message_private_key: Some(message_keys.private_key().to_string()),
             created_at: Utc::now(),
         };
         match identity.write_to(&path) {
@@ -99,6 +115,12 @@ impl IdentityFile {
         let bytes = serde_json::to_vec_pretty(self).map_err(|source| json_error(path, source))?;
         write_new_identity_file(path, &bytes)?;
         Ok(())
+    }
+
+    fn write_replace(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        let bytes = serde_json::to_vec_pretty(self).map_err(|source| json_error(path, source))?;
+        write_identity_file_replace(path, &bytes)
     }
 
     fn validate(&self) -> Result<()> {
@@ -131,7 +153,33 @@ impl IdentityFile {
                 ));
             }
         }
+        match (
+            &self.message_key_id,
+            &self.message_public_key,
+            &self.message_private_key,
+        ) {
+            (None, None, None) => {}
+            (Some(key_id), Some(public_key), Some(private_key)) => {
+                MessageKeyPair::from_parts(key_id, public_key, private_key)?;
+            }
+            _ => {
+                return Err(AichanError::InvalidIdentity(
+                    "message key fields must be all present or all absent".to_string(),
+                ));
+            }
+        }
         Ok(())
+    }
+
+    fn ensure_message_key_pair(&mut self) -> bool {
+        if self.message_key_pair().is_ok() {
+            return false;
+        }
+        let message_keys = MessageKeyPair::generate(format!("key_{}", Uuid::new_v4().simple()));
+        self.message_key_id = Some(message_keys.key_id().to_string());
+        self.message_public_key = Some(message_keys.public_key().to_string());
+        self.message_private_key = Some(message_keys.private_key().to_string());
+        true
     }
 
     pub fn signing_key(&self) -> Result<SigningKey> {
@@ -151,6 +199,20 @@ impl IdentityFile {
         }
 
         Ok(signing_key)
+    }
+
+    pub fn message_key_pair(&self) -> Result<MessageKeyPair> {
+        MessageKeyPair::from_parts(
+            self.message_key_id.as_deref().ok_or_else(|| {
+                AichanError::InvalidIdentity("missing message_key_id".to_string())
+            })?,
+            self.message_public_key.as_deref().ok_or_else(|| {
+                AichanError::InvalidIdentity("missing message_public_key".to_string())
+            })?,
+            self.message_private_key.as_deref().ok_or_else(|| {
+                AichanError::InvalidIdentity("missing message_private_key".to_string())
+            })?,
+        )
     }
 }
 
@@ -178,6 +240,22 @@ fn write_new_identity_file(path: &Path, bytes: &[u8]) -> Result<()> {
         .map_err(|source| io_error(path, source))
 }
 
+#[cfg(unix)]
+fn write_identity_file_replace(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .create(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|source| io_error(path, source))?;
+    file.write_all(bytes)
+        .map_err(|source| io_error(path, source))
+}
+
 #[cfg(not(unix))]
 fn write_new_identity_file(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
@@ -185,6 +263,20 @@ fn write_new_identity_file(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
+        .open(path)
+        .map_err(|source| io_error(path, source))?;
+    file.write_all(bytes)
+        .map_err(|source| io_error(path, source))
+}
+
+#[cfg(not(unix))]
+fn write_identity_file_replace(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .create(true)
         .open(path)
         .map_err(|source| io_error(path, source))?;
     file.write_all(bytes)

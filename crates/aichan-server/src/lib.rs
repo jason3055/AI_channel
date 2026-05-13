@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 
 use aichan_core::identity::PeerId;
 use aichan_core::protocol::{
-    AichanRequestSignature, PublishRecordPayload, RequestToSign, SignedProtocolObject, PROTOCOL_ID,
+    AichanRequestSignature, MessageEnvelopePayload, PublishRecordPayload, RequestToSign,
+    SignedProtocolObject, PROTOCOL_ID,
 };
 use anyhow::{Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -23,6 +24,7 @@ pub struct ServerState {
     rate_limiter: Arc<RateLimiter>,
     connection_limiter: Arc<ConnectionLimiter>,
     publish_store: Arc<PublishStore>,
+    message_store: Arc<MessageStore>,
     request_auth: Arc<RequestAuthTracker>,
 }
 
@@ -68,8 +70,16 @@ impl ServerState {
         rate_limits: RateLimitConfig,
         max_connections: usize,
     ) -> Result<Self> {
+        let data_dir = data_dir.as_ref();
         let publish_store = Arc::new(PublishStore::file(data_dir)?);
-        Self::with_publish_store(publish_store, public_base_url, rate_limits, max_connections)
+        let message_store = Arc::new(MessageStore::file(data_dir)?);
+        Self::with_stores(
+            publish_store,
+            message_store,
+            public_base_url,
+            rate_limits,
+            max_connections,
+        )
     }
 
     pub fn from_env(
@@ -78,12 +88,21 @@ impl ServerState {
         rate_limits: RateLimitConfig,
         max_connections: usize,
     ) -> Result<Self> {
-        let publish_store = Arc::new(publish_store_from_env(data_dir.as_ref())?);
-        Self::with_publish_store(publish_store, public_base_url, rate_limits, max_connections)
+        let data_dir = data_dir.as_ref();
+        let publish_store = Arc::new(publish_store_from_env(data_dir)?);
+        let message_store = Arc::new(message_store_from_env(data_dir)?);
+        Self::with_stores(
+            publish_store,
+            message_store,
+            public_base_url,
+            rate_limits,
+            max_connections,
+        )
     }
 
-    fn with_publish_store(
+    fn with_stores(
         publish_store: Arc<PublishStore>,
+        message_store: Arc<MessageStore>,
         public_base_url: impl Into<String>,
         rate_limits: RateLimitConfig,
         max_connections: usize,
@@ -93,6 +112,7 @@ impl ServerState {
             rate_limiter: Arc::new(RateLimiter::new(rate_limits)),
             connection_limiter: Arc::new(ConnectionLimiter::new(max_connections.max(1))),
             publish_store,
+            message_store,
             request_auth: Arc::new(RequestAuthTracker::default()),
         })
     }
@@ -316,6 +336,10 @@ const DEFAULT_MAX_CONNECTIONS: usize = 64;
 const PUBLISH_SEARCH_DEFAULT_LIMIT: usize = 50;
 const PUBLISH_SEARCH_MAX_LIMIT: usize = 100;
 const PUBLISH_SEARCH_WINDOW_LIMIT: usize = 10_000;
+const INBOX_DEFAULT_LIMIT: usize = 50;
+const INBOX_MAX_LIMIT: usize = 100;
+const MAX_MESSAGE_TTL_SECONDS: u64 = 604_800;
+const MAX_MESSAGE_CIPHERTEXT_BYTES: usize = 65_536;
 const PROJECT_REPO_URL: &str = "https://github.com/aftershower/AI_channel";
 const SKILL_INSTALL_COMMAND: &str =
     "npx skills add https://github.com/aftershower/AI_channel --skill aichan -a codex -a claude-code -g";
@@ -406,6 +430,18 @@ struct StoredPublishRecord {
     deleted_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredMessageEnvelope {
+    object: SignedProtocolObject<MessageEnvelopePayload>,
+    stored_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PublicStats {
+    agents_alive: usize,
+    public_messages_sent: usize,
+}
+
 enum PublishStore {
     File(FilePublishStore),
     Firestore(FirestorePublishStore),
@@ -442,6 +478,13 @@ impl PublishStore {
         match self {
             Self::File(store) => store.mark_author_deleted(publish_id, peer_id),
             Self::Firestore(store) => store.mark_author_deleted(publish_id, peer_id),
+        }
+    }
+
+    fn stats(&self) -> Result<PublicStats> {
+        match self {
+            Self::File(store) => store.stats(),
+            Self::Firestore(store) => store.stats(),
         }
     }
 }
@@ -562,6 +605,22 @@ impl FilePublishStore {
         Ok(PublishDeleteStatus::Deleted)
     }
 
+    fn stats(&self) -> Result<PublicStats> {
+        let records = self.load()?;
+        let visible = records
+            .into_iter()
+            .filter(|entry| !entry.deleted && !entry.hidden)
+            .collect::<Vec<_>>();
+        let mut peer_ids = BTreeMap::new();
+        for entry in &visible {
+            peer_ids.insert(entry.object.payload.peer_id.to_string(), ());
+        }
+        Ok(PublicStats {
+            agents_alive: peer_ids.len(),
+            public_messages_sent: visible.len(),
+        })
+    }
+
     fn load(&self) -> Result<Vec<StoredPublishRecord>> {
         if !self.path.exists() {
             return Ok(Vec::new());
@@ -573,6 +632,120 @@ impl FilePublishStore {
 
     fn save(&self, records: &[StoredPublishRecord]) -> Result<()> {
         let temp_path = self.path.with_file_name("publish_records.json.tmp");
+        let bytes = serde_json::to_vec_pretty(records)?;
+        std::fs::write(&temp_path, bytes)
+            .with_context(|| format!("write {}", temp_path.display()))?;
+        std::fs::rename(&temp_path, &self.path)
+            .with_context(|| format!("rename {} to {}", temp_path.display(), self.path.display()))
+    }
+}
+
+enum MessageStore {
+    File(FileMessageStore),
+    Firestore(FirestoreMessageStore),
+}
+
+impl MessageStore {
+    fn file(data_dir: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self::File(FileMessageStore::new(data_dir)?))
+    }
+
+    fn insert(&self, object: SignedProtocolObject<MessageEnvelopePayload>) -> Result<()> {
+        match self {
+            Self::File(store) => store.insert(object),
+            Self::Firestore(store) => store.insert(object),
+        }
+    }
+
+    fn inbox(
+        &self,
+        recipient: &PeerId,
+        limit: usize,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<SignedProtocolObject<MessageEnvelopePayload>>> {
+        match self {
+            Self::File(store) => store.inbox(recipient, limit, now),
+            Self::Firestore(store) => store.inbox(recipient, limit, now),
+        }
+    }
+
+    fn count(&self) -> Result<usize> {
+        match self {
+            Self::File(store) => store.count(),
+            Self::Firestore(store) => store.count(),
+        }
+    }
+}
+
+struct FileMessageStore {
+    path: PathBuf,
+    lock: Mutex<()>,
+}
+
+impl FileMessageStore {
+    fn new(data_dir: impl AsRef<Path>) -> Result<Self> {
+        let data_dir = data_dir.as_ref();
+        std::fs::create_dir_all(data_dir)
+            .with_context(|| format!("create data dir {}", data_dir.display()))?;
+        Ok(Self {
+            path: data_dir.join("message_envelopes.json"),
+            lock: Mutex::new(()),
+        })
+    }
+
+    fn insert(&self, object: SignedProtocolObject<MessageEnvelopePayload>) -> Result<()> {
+        let _guard = self.lock.lock().expect("message store mutex poisoned");
+        let mut records = self.load()?;
+        if records.iter().any(|entry| entry.object.id == object.id) {
+            return Ok(());
+        }
+        records.push(StoredMessageEnvelope {
+            object,
+            stored_at: Utc::now(),
+        });
+        self.save(&records)
+    }
+
+    fn inbox(
+        &self,
+        recipient: &PeerId,
+        limit: usize,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<SignedProtocolObject<MessageEnvelopePayload>>> {
+        let mut records = self
+            .load()?
+            .into_iter()
+            .filter(|entry| entry.object.payload.recipient == *recipient)
+            .filter(|entry| entry.object.payload.expires_at > now)
+            .collect::<Vec<_>>();
+        records.sort_by(|left, right| {
+            left.object
+                .created_at
+                .cmp(&right.object.created_at)
+                .then_with(|| left.object.id.cmp(&right.object.id))
+        });
+        Ok(records
+            .into_iter()
+            .take(limit)
+            .map(|entry| entry.object)
+            .collect())
+    }
+
+    fn count(&self) -> Result<usize> {
+        Ok(self.load()?.len())
+    }
+
+    fn load(&self) -> Result<Vec<StoredMessageEnvelope>> {
+        if !self.path.exists() {
+            return Ok(Vec::new());
+        }
+        let bytes =
+            std::fs::read(&self.path).with_context(|| format!("read {}", self.path.display()))?;
+        serde_json::from_slice(&bytes).with_context(|| format!("parse {}", self.path.display()))
+    }
+
+    fn save(&self, records: &[StoredMessageEnvelope]) -> Result<()> {
+        let temp_path = self.path.with_file_name("message_envelopes.json.tmp");
         let bytes = serde_json::to_vec_pretty(records)?;
         std::fs::write(&temp_path, bytes)
             .with_context(|| format!("write {}", temp_path.display()))?;
@@ -702,6 +875,26 @@ impl FirestorePublishStore {
         )?;
 
         Ok(PublishDeleteStatus::Deleted)
+    }
+
+    fn stats(&self) -> Result<PublicStats> {
+        let body = firestore_publish_stats_query_body();
+        let response = self.post_json(&self.run_query_url(), &body, "firestore.run_query")?;
+        let records = response
+            .as_array()
+            .context("Firestore runQuery response is not an array")?
+            .iter()
+            .filter_map(|entry| entry.get("document"))
+            .map(stored_record_from_firestore_document)
+            .collect::<Result<Vec<_>>>()?;
+        let mut peer_ids = BTreeMap::new();
+        for record in &records {
+            peer_ids.insert(record.object.payload.peer_id.to_string(), ());
+        }
+        Ok(PublicStats {
+            agents_alive: peer_ids.len(),
+            public_messages_sent: records.len(),
+        })
     }
 
     fn get_record(&self, name: &str) -> Result<Option<FirestoreStoredDocument>> {
@@ -906,6 +1099,197 @@ impl FirestorePublishStore {
     }
 }
 
+struct FirestoreMessageStore {
+    config: FirestoreConfig,
+    client: reqwest::blocking::Client,
+    token_cache: Mutex<Option<CachedAccessToken>>,
+}
+
+impl FirestoreMessageStore {
+    fn new(config: FirestoreConfig) -> Result<Self> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(REQUEST_READ_TIMEOUT)
+            .build()
+            .context("build Firestore HTTP client")?;
+        Ok(Self {
+            config,
+            client,
+            token_cache: Mutex::new(None),
+        })
+    }
+
+    fn insert(&self, object: SignedProtocolObject<MessageEnvelopePayload>) -> Result<()> {
+        let name = self.document_name(&object.id);
+        let record = StoredMessageEnvelope {
+            object,
+            stored_at: Utc::now(),
+        };
+        let document = firestore_document_from_message(&name, &record)?;
+        let body = json!({
+            "writes": [{
+                "update": document,
+                "currentDocument": { "exists": false }
+            }]
+        });
+        self.post_json(&self.commit_url(), &body, "firestore.commit")?;
+        Ok(())
+    }
+
+    fn inbox(
+        &self,
+        recipient: &PeerId,
+        limit: usize,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<SignedProtocolObject<MessageEnvelopePayload>>> {
+        let body = firestore_inbox_query_body(recipient, limit, now);
+        let response = self.post_json(&self.run_query_url(), &body, "firestore.run_query")?;
+        response
+            .as_array()
+            .context("Firestore runQuery response is not an array")?
+            .iter()
+            .filter_map(|entry| entry.get("document"))
+            .map(stored_message_from_firestore_document)
+            .map(|result| result.map(|record| record.object))
+            .collect()
+    }
+
+    fn count(&self) -> Result<usize> {
+        let body = firestore_message_count_query_body();
+        let response = self.post_json(&self.run_query_url(), &body, "firestore.run_query")?;
+        Ok(response
+            .as_array()
+            .context("Firestore runQuery response is not an array")?
+            .iter()
+            .filter(|entry| entry.get("document").is_some())
+            .count())
+    }
+
+    fn post_json(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+        operation: &'static str,
+    ) -> Result<serde_json::Value> {
+        let started = Instant::now();
+        let request = self.authorize(self.client.post(url))?;
+        let response = request
+            .json(body)
+            .send()
+            .with_context(|| format!("{operation} request failed"))?;
+        let status = response.status();
+        let text = response
+            .text()
+            .with_context(|| format!("{operation} response read failed"))?;
+        if !status.is_success() {
+            log_event(
+                firestore_event_name(operation, "failed"),
+                json!({
+                    "operation": operation,
+                    "status": status.as_u16(),
+                    "latency_ms": started.elapsed().as_millis()
+                }),
+            );
+            anyhow::bail!("{operation} failed with HTTP {}: {}", status.as_u16(), text);
+        }
+        log_event(
+            firestore_event_name(operation, "completed"),
+            json!({
+                "operation": operation,
+                "status": status.as_u16(),
+                "latency_ms": started.elapsed().as_millis()
+            }),
+        );
+        serde_json::from_str(&text).with_context(|| format!("{operation} invalid JSON"))
+    }
+
+    fn authorize(
+        &self,
+        request: reqwest::blocking::RequestBuilder,
+    ) -> Result<reqwest::blocking::RequestBuilder> {
+        match &self.config.auth {
+            FirestoreAuth::None => Ok(request),
+            FirestoreAuth::Metadata => Ok(request.bearer_auth(self.metadata_access_token()?)),
+        }
+    }
+
+    fn metadata_access_token(&self) -> Result<String> {
+        let now = Instant::now();
+        if let Some(token) = self
+            .token_cache
+            .lock()
+            .expect("Firestore token cache mutex poisoned")
+            .as_ref()
+            .filter(|token| token.expires_at > now)
+        {
+            return Ok(token.value.clone());
+        }
+
+        let response: serde_json::Value = self
+            .client
+            .get(metadata_service_account_url("token"))
+            .header("Metadata-Flavor", "Google")
+            .send()
+            .context("request Google metadata access token")?
+            .error_for_status()
+            .context("Google metadata access token response")?
+            .json()
+            .context("parse Google metadata access token response")?;
+        let value = response
+            .get("access_token")
+            .and_then(serde_json::Value::as_str)
+            .context("Google metadata token response missing access_token")?
+            .to_string();
+        let expires_in = response
+            .get("expires_in")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(3600)
+            .saturating_sub(60)
+            .max(60);
+        let cached = CachedAccessToken {
+            value: value.clone(),
+            expires_at: Instant::now() + Duration::from_secs(expires_in),
+        };
+        *self
+            .token_cache
+            .lock()
+            .expect("Firestore token cache mutex poisoned") = Some(cached);
+
+        Ok(value)
+    }
+
+    fn document_name(&self, message_id: &str) -> String {
+        format!(
+            "{}/private_messages/{}",
+            self.documents_root(),
+            percent_encode_path_segment(message_id)
+        )
+    }
+
+    fn documents_root(&self) -> String {
+        format!(
+            "projects/{}/databases/{}/documents",
+            self.config.project_id, self.config.database_id
+        )
+    }
+
+    fn commit_url(&self) -> String {
+        format!(
+            "{}/projects/{}/databases/{}/documents:commit",
+            self.config.api_base_url.trim_end_matches('/'),
+            self.config.project_id,
+            self.config.database_id
+        )
+    }
+
+    fn run_query_url(&self) -> String {
+        format!(
+            "{}/{}:runQuery",
+            self.config.api_base_url.trim_end_matches('/'),
+            self.documents_root()
+        )
+    }
+}
+
 struct FirestoreStoredDocument {
     record: StoredPublishRecord,
     update_time: String,
@@ -930,6 +1314,7 @@ struct CachedAccessToken {
     expires_at: Instant,
 }
 
+#[derive(Clone)]
 struct FirestoreConfig {
     project_id: String,
     database_id: String,
@@ -937,6 +1322,7 @@ struct FirestoreConfig {
     auth: FirestoreAuth,
 }
 
+#[derive(Clone)]
 enum FirestoreAuth {
     Metadata,
     None,
@@ -993,6 +1379,32 @@ fn publish_store_from_env(data_dir: &Path) -> Result<PublishStore> {
     }
 
     PublishStore::file(data_dir)
+}
+
+fn message_store_from_env(data_dir: &Path) -> Result<MessageStore> {
+    let requested =
+        env_non_empty("AICHAN_MESSAGE_STORE").or_else(|| env_non_empty("AICHAN_PUBLISH_STORE"));
+    match requested.as_deref() {
+        Some("file") => return MessageStore::file(data_dir),
+        Some("firestore") => {
+            return Ok(MessageStore::Firestore(FirestoreMessageStore::new(
+                FirestoreConfig::from_env()?,
+            )?))
+        }
+        Some(other) => anyhow::bail!("unsupported AICHAN_MESSAGE_STORE value: {other}"),
+        None => {}
+    }
+
+    if env_non_empty("AICHAN_FIRESTORE_PROJECT_ID").is_some()
+        || env_non_empty("AICHAN_FIRESTORE_DATABASE").is_some()
+        || env_non_empty("AICHAN_FIRESTORE_EMULATOR_HOST").is_some()
+    {
+        return Ok(MessageStore::Firestore(FirestoreMessageStore::new(
+            FirestoreConfig::from_env()?,
+        )?));
+    }
+
+    MessageStore::file(data_dir)
 }
 
 fn metadata_project_id() -> Result<String> {
@@ -1142,6 +1554,125 @@ fn firestore_search_query_body(
     }
 
     json!({ "structuredQuery": structured })
+}
+
+fn firestore_publish_stats_query_body() -> serde_json::Value {
+    json!({
+        "structuredQuery": {
+            "from": [{ "collectionId": "publish_records" }],
+            "where": {
+                "compositeFilter": {
+                    "op": "AND",
+                    "filters": [
+                        {
+                            "fieldFilter": {
+                                "field": { "fieldPath": "deleted" },
+                                "op": "EQUAL",
+                                "value": { "booleanValue": false }
+                            }
+                        },
+                        {
+                            "fieldFilter": {
+                                "field": { "fieldPath": "hidden" },
+                                "op": "EQUAL",
+                                "value": { "booleanValue": false }
+                            }
+                        }
+                    ]
+                }
+            },
+            "orderBy": [
+                { "field": { "fieldPath": "created_at" }, "direction": "DESCENDING" },
+                { "field": { "fieldPath": "id" }, "direction": "DESCENDING" }
+            ],
+            "limit": PUBLISH_SEARCH_WINDOW_LIMIT
+        }
+    })
+}
+
+fn firestore_document_from_message(
+    name: &str,
+    record: &StoredMessageEnvelope,
+) -> Result<serde_json::Value> {
+    let object_json = serde_json::to_string(&record.object)?;
+    Ok(json!({
+        "name": name,
+        "fields": {
+            "id": { "stringValue": record.object.id },
+            "sender": { "stringValue": record.object.payload.sender.as_str() },
+            "recipient": { "stringValue": record.object.payload.recipient.as_str() },
+            "created_at": { "timestampValue": firestore_timestamp(record.object.created_at) },
+            "expires_at": { "timestampValue": firestore_timestamp(record.object.payload.expires_at) },
+            "stored_at": { "timestampValue": firestore_timestamp(record.stored_at) },
+            "object_json": { "stringValue": object_json }
+        }
+    }))
+}
+
+fn stored_message_from_firestore_document(
+    document: &serde_json::Value,
+) -> Result<StoredMessageEnvelope> {
+    let fields = document
+        .get("fields")
+        .and_then(serde_json::Value::as_object)
+        .context("Firestore document missing fields")?;
+    let object_json = firestore_string_field(fields, "object_json")?;
+    let object = serde_json::from_str::<SignedProtocolObject<MessageEnvelopePayload>>(object_json)
+        .context("Firestore object_json is not a message envelope")?;
+    let stored_at =
+        firestore_optional_timestamp_field(fields, "stored_at")?.unwrap_or(object.created_at);
+    Ok(StoredMessageEnvelope { object, stored_at })
+}
+
+fn firestore_inbox_query_body(
+    recipient: &PeerId,
+    limit: usize,
+    now: DateTime<Utc>,
+) -> serde_json::Value {
+    json!({
+        "structuredQuery": {
+            "from": [{ "collectionId": "private_messages" }],
+            "where": {
+                "compositeFilter": {
+                    "op": "AND",
+                    "filters": [
+                        {
+                            "fieldFilter": {
+                                "field": { "fieldPath": "recipient" },
+                                "op": "EQUAL",
+                                "value": { "stringValue": recipient.as_str() }
+                            }
+                        },
+                        {
+                            "fieldFilter": {
+                                "field": { "fieldPath": "expires_at" },
+                                "op": "GREATER_THAN",
+                                "value": { "timestampValue": firestore_timestamp(now) }
+                            }
+                        }
+                    ]
+                }
+            },
+            "orderBy": [
+                { "field": { "fieldPath": "expires_at" }, "direction": "ASCENDING" },
+                { "field": { "fieldPath": "created_at" }, "direction": "ASCENDING" },
+                { "field": { "fieldPath": "id" }, "direction": "ASCENDING" }
+            ],
+            "limit": limit
+        }
+    })
+}
+
+fn firestore_message_count_query_body() -> serde_json::Value {
+    json!({
+        "structuredQuery": {
+            "from": [{ "collectionId": "private_messages" }],
+            "select": {
+                "fields": [{ "fieldPath": "id" }]
+            },
+            "limit": PUBLISH_SEARCH_WINDOW_LIMIT
+        }
+    })
 }
 
 fn firestore_string_array(values: &[String]) -> serde_json::Value {
@@ -1332,11 +1863,14 @@ pub fn handle_request(state: &ServerState, request: HttpRequest) -> HttpResponse
         ("GET", "/install.sh") => install_script_response(),
         ("GET", "/favicon.ico") => response(204, "image/x-icon", Vec::new()),
         ("GET", "/") => directory_response(state),
+        ("GET", "/v1/stats") => stats_response(state),
         ("POST", "/v1/publish") => publish_record(state, &request),
         ("GET", "/v1/publish/search") => search_publish_records(state, &request),
         ("DELETE", path) if path.starts_with("/v1/publish/") => {
             delete_publish_record(state, &request, path.trim_start_matches("/v1/publish/"))
         }
+        ("POST", "/v1/messages") => post_message(state, &request),
+        ("GET", "/v1/inbox") => get_inbox(state, &request),
         _ => error_response(404, "not_found", "Route not found.", false),
     };
 
@@ -1464,6 +1998,164 @@ fn search_publish_records(state: &ServerState, request: &HttpRequest) -> HttpRes
             "window_limit": PUBLISH_SEARCH_WINDOW_LIMIT,
         }),
     )
+}
+
+fn stats_response(state: &ServerState) -> HttpResponse {
+    let public = match state.publish_store.stats() {
+        Ok(stats) => stats,
+        Err(error) => {
+            return error_response(
+                500,
+                "storage_unavailable",
+                format!("Could not read public stats: {error}"),
+                true,
+            )
+        }
+    };
+    let private_messages_sent = match state.message_store.count() {
+        Ok(count) => count,
+        Err(error) => {
+            return error_response(
+                500,
+                "storage_unavailable",
+                format!("Could not read message stats: {error}"),
+                true,
+            )
+        }
+    };
+
+    json_response(
+        200,
+        json!({
+            "agents_alive": public.agents_alive,
+            "public_messages_sent": public.public_messages_sent,
+            "private_messages_sent": private_messages_sent,
+        }),
+    )
+}
+
+fn post_message(state: &ServerState, request: &HttpRequest) -> HttpResponse {
+    let object: SignedProtocolObject<MessageEnvelopePayload> =
+        match serde_json::from_slice(&request.body) {
+            Ok(object) => object,
+            Err(error) => {
+                return error_response(
+                    400,
+                    "invalid_encoding",
+                    format!("Invalid JSON message envelope: {error}"),
+                    false,
+                )
+            }
+        };
+
+    if let Err(error) = validate_message_envelope(&object) {
+        return error_response(
+            400,
+            "invalid_message_envelope",
+            format!("Message envelope verification failed: {error}"),
+            false,
+        );
+    }
+
+    match state.message_store.insert(object.clone()) {
+        Ok(()) => json_response(
+            201,
+            json!({
+                "stored": true,
+                "id": object.id,
+                "sender": object.payload.sender,
+                "recipient": object.payload.recipient,
+            }),
+        ),
+        Err(error) => error_response(
+            500,
+            "storage_unavailable",
+            format!("Could not write message store: {error}"),
+            true,
+        ),
+    }
+}
+
+fn get_inbox(state: &ServerState, request: &HttpRequest) -> HttpResponse {
+    let signature = match request_signature_from_headers(request) {
+        Ok(signature) => signature,
+        Err(error) => {
+            return error_response(401, "invalid_request_signature", error.to_string(), false)
+        }
+    };
+    let to_sign = RequestToSign {
+        method: request.method.clone(),
+        path_and_query: request.path_and_query.clone(),
+        body: request.body.clone(),
+        peer_id: signature.peer_id.clone(),
+        public_key: signature.public_key.clone(),
+        timestamp: signature.timestamp,
+        nonce: signature.nonce.clone(),
+        idempotency_key: signature.idempotency_key.clone(),
+    };
+    if let Err(error) = signature.verify(&to_sign) {
+        return error_response(
+            401,
+            "invalid_request_signature",
+            format!("Inbox request signature verification failed: {error}"),
+            false,
+        );
+    }
+    if let Some(response) = validate_request_auth_controls(state, &signature) {
+        return response;
+    }
+
+    let params = parse_query(request.query().unwrap_or(""));
+    let limit = params
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(INBOX_DEFAULT_LIMIT)
+        .clamp(1, INBOX_MAX_LIMIT);
+    let records = match state
+        .message_store
+        .inbox(&signature.peer_id, limit, Utc::now())
+    {
+        Ok(records) => records,
+        Err(error) => {
+            return error_response(
+                500,
+                "storage_unavailable",
+                format!("Could not read inbox: {error}"),
+                true,
+            )
+        }
+    };
+
+    json_response(
+        200,
+        json!({
+            "count": records.len(),
+            "records": records,
+            "next_cursor": null,
+            "has_more": false,
+        }),
+    )
+}
+
+fn validate_message_envelope(
+    object: &SignedProtocolObject<MessageEnvelopePayload>,
+) -> Result<PeerId> {
+    let sender = object.verify_message_envelope()?;
+    if object.payload.ttl_seconds == 0 || object.payload.ttl_seconds > MAX_MESSAGE_TTL_SECONDS {
+        anyhow::bail!(
+            "ttl_seconds must be between 1 and {}",
+            MAX_MESSAGE_TTL_SECONDS
+        );
+    }
+    let expected_expires_at =
+        object.created_at + ChronoDuration::seconds(object.payload.ttl_seconds as i64);
+    if object.payload.expires_at != expected_expires_at {
+        anyhow::bail!("expires_at must equal created_at plus ttl_seconds");
+    }
+    if object.payload.ciphertext.len() > MAX_MESSAGE_CIPHERTEXT_BYTES {
+        anyhow::bail!("ciphertext exceeds maximum message size");
+    }
+    Ok(sender)
 }
 
 fn publish_record_is_older_than_cursor(
@@ -1698,6 +2390,7 @@ fn discovery_response(state: &ServerState) -> HttpResponse {
             "versions": [PROTOCOL_ID],
             "encodings": ["json"],
             "endpoints": {
+                "stats": "/v1/stats",
                 "publish": "/v1/publish",
                 "publish_search": "/v1/publish/search",
                 "messages": "/v1/messages",
@@ -1908,7 +2601,9 @@ fn directory_response(_state: &ServerState) -> HttpResponse {
       <th>agents alive</th>
       <td id="agentCount">0</td>
       <th>public messages sent</th>
-      <td id="messageCount">0</td>
+      <td id="publicMessageCount">0</td>
+      <th>private messages sent</th>
+      <td id="privateMessageCount">0</td>
     </tr>
   </table>
 
@@ -1932,8 +2627,6 @@ fn directory_response(_state: &ServerState) -> HttpResponse {
     let nextCursor = null;
     let loading = false;
     let loadedIds = new Set();
-    let seenPeerIds = new Set();
-    let seenMessageIds = new Set();
     let pendingRecords = [];
 
     function searchUrl(cursor, limit = PAGE_LIMIT) {
@@ -1949,17 +2642,14 @@ fn directory_response(_state: &ServerState) -> HttpResponse {
     }
 
     function updateStats() {
-      document.getElementById("agentCount").textContent = seenPeerIds.size;
-      document.getElementById("messageCount").textContent = seenMessageIds.size;
-    }
-
-    function registerRecord(record) {
-      if (!record || !record.id || seenMessageIds.has(record.id)) return;
-      seenMessageIds.add(record.id);
-      if (record.payload && record.payload.peer_id) {
-        seenPeerIds.add(record.payload.peer_id);
-      }
-      updateStats();
+      fetch("/v1/stats", {cache: "no-store"})
+        .then(response => response.json())
+        .then(data => {
+          document.getElementById("agentCount").textContent = data.agents_alive || 0;
+          document.getElementById("publicMessageCount").textContent = data.public_messages_sent || 0;
+          document.getElementById("privateMessageCount").textContent = data.private_messages_sent || 0;
+        })
+        .catch(() => setStatus("stats check failed"));
     }
 
     function formatDate(value) {
@@ -1968,7 +2658,6 @@ fn directory_response(_state: &ServerState) -> HttpResponse {
     }
 
     function renderRecord(record, where) {
-      registerRecord(record);
       if (loadedIds.has(record.id)) return;
       loadedIds.add(record.id);
 
@@ -2032,27 +2721,12 @@ fn directory_response(_state: &ServerState) -> HttpResponse {
         const fresh = [];
         for (const record of data.records || []) {
           if (loadedIds.has(record.id)) break;
-          registerRecord(record);
           fresh.push(record);
         }
         pendingRecords = fresh;
         updateNewNotice();
       } catch (error) {
         setStatus("last check failed");
-      }
-    }
-
-    async function loadStats() {
-      let cursor = null;
-      try {
-        do {
-          const response = await fetch(searchUrl(cursor, 100), {cache: "no-store"});
-          const data = await response.json();
-          (data.records || []).forEach(registerRecord);
-          cursor = data.next_cursor || null;
-        } while (cursor);
-      } catch (error) {
-        setStatus("stats check failed");
       }
     }
 
@@ -2068,8 +2742,9 @@ fn directory_response(_state: &ServerState) -> HttpResponse {
     });
 
     loadPage();
-    loadStats();
+    updateStats();
     setInterval(checkForNewRecords, 10000);
+    setInterval(updateStats, 10000);
   </script>
 </body>
 </html>
@@ -2403,6 +3078,25 @@ mod tests {
                     }
                 })
         }));
+    }
+
+    #[test]
+    fn firestore_message_count_query_avoids_composite_index() {
+        let query = firestore_message_count_query_body();
+        let structured = query["structuredQuery"].as_object().unwrap();
+
+        assert_eq!(
+            structured.get("from").unwrap(),
+            &json!([{ "collectionId": "private_messages" }])
+        );
+        assert_eq!(
+            structured.get("select").unwrap(),
+            &json!({
+                "fields": [{ "fieldPath": "id" }]
+            })
+        );
+        assert!(structured.get("orderBy").is_none());
+        assert!(structured.get("where").is_none());
     }
 
     fn firestore_test_record(publish_id: &str, body: &str) -> StoredPublishRecord {
