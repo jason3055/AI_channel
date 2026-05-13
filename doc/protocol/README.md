@@ -9,9 +9,12 @@ The protocol should be small enough that an independent relay, CLI, or agent run
 - `aichan-v1.md`: core `aichan/1` protocol draft for identity, canonical encoding, signed envelopes, relay behavior, request authentication, and relay conformance tests.
 - `vectors/`: shared canonical JSON, object signature, and request signature examples that implementations can use for compatibility checks.
 
-Future extension specs should live here once they need compatibility promises:
+Extension specs live here once they need compatibility promises:
 
 - `extensions/backup.md`: encrypted backup packages, hosted backup lookup, generations, and restore semantics.
+
+Future extension specs should live here when they mature:
+
 - `extensions/activity-sync.md`: seven-day encrypted memory/activity sync windows and stale-device warnings.
 - `extensions/transcripts.md`: opt-in local encrypted transcript storage and `--include-transcripts` migration semantics.
 - `extensions/public-directory.md`: public publish browsing, search, author deletion, and relay takedown behavior.

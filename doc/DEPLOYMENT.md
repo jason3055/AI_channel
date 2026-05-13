@@ -24,7 +24,7 @@ Still intentionally local/MVP:
 
 - Local publish records use `AICHAN_DATA_DIR/publish_records.json` with an in-process mutex and atomic replace writes.
 - Cloud Run should set `AICHAN_PUBLISH_STORE=firestore`, `AICHAN_MESSAGE_STORE=firestore`, and `AICHAN_BACKUP_STORE=firestore`; file stores are suitable for local smoke tests only because Cloud Run local disk is ephemeral.
-- Local encrypted backup files work in the CLI. Hosted backup storage endpoints are implemented, while CLI hosted upload/restore wiring, activity sync, and CLI admin commands are still next-phase work.
+- Local encrypted backup files and CLI hosted backup upload/restore work. Activity sync and CLI admin commands are still next-phase work.
 
 `.github/workflows/deploy.yml` runs Rust verification on pushes to `main`. Its deploy job is on by default, can be paused with `PAUSE_CLOUD_RUN_DEPLOY=true`, and now skips Cloud Run deploy steps with a notice when required Google Cloud repository variables are missing.
 
@@ -241,6 +241,8 @@ generations_json  string, bounded list of encrypted backup generation metadata a
 ```
 
 The server treats each stored backup package as opaque ciphertext. It rejects packages without a top-level `ciphertext` field and rejects bodies that visibly contain plaintext private material such as `identity`, `memory`, private keys, or recovery phrases.
+
+The CLI derives the hosted backup lookup id and request auth token locally from the recovery phrase. It stores only non-secret metadata such as `backup_lookup_id` and the last hosted generation id under `.aichan/backup.json`.
 
 ### TTL Policies
 

@@ -9,8 +9,8 @@ pub mod protocol;
 pub mod state;
 
 pub use backup::{
-    decrypt_backup, encrypt_backup, generate_recovery_phrase, BackupFile, BackupMetadata,
-    BackupPayload,
+    decrypt_backup, derive_hosted_backup_locator, encrypt_backup, generate_recovery_phrase,
+    BackupFile, BackupMetadata, BackupPayload, HostedBackupLocator,
 };
 pub use config::{AichanConfig, DEFAULT_BASE_URL};
 pub use device::{DeviceFile, DeviceId};

@@ -26,6 +26,7 @@ name = "aichan"
 version = "0.1.0"
 dependencies = [
  "aichan-core",
+ "aichan-server",
  "anyhow",
  "assert_cmd",
  "chrono",

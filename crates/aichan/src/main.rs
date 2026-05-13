@@ -9,16 +9,16 @@ use aichan_core::protocol::{
     PublishRecordPayload, RequestToSign, SignedProtocolObject, UnsignedProtocolObject,
 };
 use aichan_core::{
-    decrypt_backup, encrypt_backup, generate_recovery_phrase,
+    decrypt_backup, derive_hosted_backup_locator, encrypt_backup, generate_recovery_phrase,
     message_crypto::{
         decrypt_private_message, encrypt_private_message, message_encryption_aad,
         SealedPrivateMessage, MESSAGE_ENCRYPTION_SUITE,
     },
-    AichanConfig, BackupFile, BackupMetadata, BackupPayload, DeviceFile, IdentityFile,
-    LocalStateDir, MemoryFile, PeerId,
+    AichanConfig, BackupFile, BackupMetadata, BackupPayload, DeviceFile, HostedBackupLocator,
+    IdentityFile, LocalStateDir, MemoryFile, PeerId,
 };
 use anyhow::{anyhow, Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
@@ -188,13 +188,21 @@ struct BackupCreateArgs {
     /// Output backup file path. Defaults to a new aichan-backup-*.aichan-backup file.
     #[arg(long)]
     output: Option<PathBuf>,
+
+    /// Upload the encrypted backup package to the hosted backup endpoint.
+    #[arg(long)]
+    upload: bool,
+
+    /// Relay base URL. Defaults to config or compiled default.
+    #[arg(long)]
+    base_url: Option<String>,
 }
 
 #[derive(Debug, Parser)]
 struct BackupRestoreArgs {
-    /// Encrypted backup file path.
+    /// Encrypted backup file path. Omit to restore from the hosted backup endpoint.
     #[arg(long = "file")]
-    file: PathBuf,
+    file: Option<PathBuf>,
 
     /// Recovery phrase. Prefer AICHAN_RECOVERY_PHRASE to avoid shell history.
     #[arg(long)]
@@ -203,6 +211,10 @@ struct BackupRestoreArgs {
     /// Overwrite existing identity, memory, and config files in this project.
     #[arg(long)]
     force: bool,
+
+    /// Relay base URL. Defaults to config or compiled default.
+    #[arg(long)]
+    base_url: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -620,11 +632,33 @@ fn backup(state: &LocalStateDir, command: BackupCommand, json: bool) -> Result<(
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct HostedBackupUploadResponse {
+    generation_id: String,
+    created_at: DateTime<Utc>,
+    size_bytes: usize,
+    content_sha256: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct HostedBackupDownloadResponse {
+    generation_id: String,
+    created_at: DateTime<Utc>,
+    size_bytes: usize,
+    content_sha256: String,
+    backup: BackupFile,
+}
+
 fn backup_create(state: &LocalStateDir, args: BackupCreateArgs, json: bool) -> Result<()> {
     let identity = IdentityFile::create_or_load(state)?;
     let device = DeviceFile::create_or_load(state)?;
     let memory = MemoryFile::create_or_load(state)?;
-    let config = Some(AichanConfig::load_or_default(state)?);
+    let config = AichanConfig::load_or_default(state)?;
+    let hosted_base_url = args.upload.then(|| {
+        config
+            .effective_base_url(args.base_url.as_deref())
+            .to_string()
+    });
     let recovery_phrase = generate_recovery_phrase();
     let created_at = Utc::now();
     let payload = BackupPayload {
@@ -633,7 +667,7 @@ fn backup_create(state: &LocalStateDir, args: BackupCreateArgs, json: bool) -> R
         source_device_id: device.device_id.clone(),
         identity,
         memory,
-        config,
+        config: Some(config),
         created_at,
     };
     let backup = encrypt_backup(&payload, &recovery_phrase)?;
@@ -645,21 +679,45 @@ fn backup_create(state: &LocalStateDir, args: BackupCreateArgs, json: bool) -> R
     metadata.last_local_backup_path = Some(output.display().to_string());
     metadata.write_to_state(state)?;
 
+    let mut hosted_upload: Option<(HostedBackupLocator, HostedBackupUploadResponse)> = None;
+    if let Some(base_url) = hosted_base_url.as_deref() {
+        let locator = derive_hosted_backup_locator(&recovery_phrase)?;
+        let upload = upload_hosted_backup(base_url, &locator, &backup)?;
+        metadata.backup_lookup_id = Some(locator.backup_lookup_id.clone());
+        metadata.last_hosted_backup_at = Some(upload.created_at);
+        metadata.last_hosted_generation_id = Some(upload.generation_id.clone());
+        metadata.write_to_state(state)?;
+        hosted_upload = Some((locator, upload));
+    }
+
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "created": true,
-                "backup_file": output.display().to_string(),
-                "peer_id": payload.peer_id,
-                "source_device_id": payload.source_device_id,
-                "created_at": created_at,
-                "recovery_phrase": recovery_phrase,
-            }))?
-        );
+        let mut value = serde_json::json!({
+            "created": true,
+            "backup_file": output.display().to_string(),
+            "peer_id": payload.peer_id,
+            "source_device_id": payload.source_device_id,
+            "created_at": created_at,
+            "recovery_phrase": recovery_phrase,
+        });
+        if let Some((locator, upload)) = &hosted_upload {
+            value["hosted"] = serde_json::json!({
+                "uploaded": true,
+                "backup_lookup_id": locator.backup_lookup_id.as_str(),
+                "generation_id": upload.generation_id.as_str(),
+                "created_at": upload.created_at.to_rfc3339(),
+                "size_bytes": upload.size_bytes,
+                "content_sha256": upload.content_sha256.as_str(),
+            });
+        }
+        println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         println!("backup_file: {}", output.display());
         println!("peer_id: {}", payload.peer_id);
+        if let Some((locator, upload)) = &hosted_upload {
+            println!("hosted_uploaded: true");
+            println!("backup_lookup_id: {}", locator.backup_lookup_id);
+            println!("hosted_generation_id: {}", upload.generation_id);
+        }
         println!("recovery_phrase: {recovery_phrase}");
         println!("Store the recovery phrase somewhere safe. It is not saved locally.");
     }
@@ -673,7 +731,30 @@ fn backup_restore(state: &LocalStateDir, args: BackupRestoreArgs, json: bool) ->
         ));
     }
     let recovery_phrase = recovery_phrase_from_args(args.recovery_phrase.as_deref())?;
-    let backup = BackupFile::read_from(&args.file)?;
+    let config = AichanConfig::load_or_default(state)?;
+    let mut local_backup_file = None;
+    let mut hosted_lookup_id = None;
+    let mut hosted_restore = None;
+    let (backup, restore_source, metadata_restore_source) = match args.file.as_ref() {
+        Some(file) => {
+            local_backup_file = Some(file.display().to_string());
+            (
+                BackupFile::read_from(file)?,
+                "file".to_string(),
+                file.display().to_string(),
+            )
+        }
+        None => {
+            let base_url = config.effective_base_url(args.base_url.as_deref());
+            let locator = derive_hosted_backup_locator(&recovery_phrase)?;
+            let download = download_hosted_backup(base_url, &locator)?;
+            let metadata_source = format!("hosted:{}", download.generation_id);
+            let backup = download.backup.clone();
+            hosted_lookup_id = Some(locator.backup_lookup_id);
+            hosted_restore = Some(download);
+            (backup, "hosted".to_string(), metadata_source)
+        }
+    };
     let payload = decrypt_backup(&backup, &recovery_phrase)?;
 
     state.ensure_dirs()?;
@@ -687,25 +768,45 @@ fn backup_restore(state: &LocalStateDir, args: BackupRestoreArgs, json: bool) ->
     let restored_at = Utc::now();
     let mut metadata = BackupMetadata::load_or_default(state)?;
     metadata.last_restore_at = Some(restored_at);
-    metadata.last_restore_source = Some(args.file.display().to_string());
+    metadata.last_restore_source = Some(metadata_restore_source);
     metadata.last_restored_peer_id = Some(payload.peer_id.clone());
+    if let Some(lookup_id) = hosted_lookup_id {
+        metadata.backup_lookup_id = Some(lookup_id);
+    }
+    if let Some(hosted) = &hosted_restore {
+        metadata.last_hosted_backup_at = Some(hosted.created_at);
+        metadata.last_hosted_generation_id = Some(hosted.generation_id.clone());
+    }
     metadata.write_to_state(state)?;
 
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "restored": true,
-                "backup_file": args.file.display().to_string(),
-                "peer_id": payload.peer_id,
-                "device_id": device.device_id,
-                "restored_at": restored_at,
-            }))?
-        );
+        let mut value = serde_json::json!({
+            "restored": true,
+            "restore_source": restore_source,
+            "peer_id": payload.peer_id,
+            "device_id": device.device_id,
+            "restored_at": restored_at,
+        });
+        if let Some(file) = local_backup_file {
+            value["backup_file"] = serde_json::json!(file);
+        }
+        if let Some(hosted) = &hosted_restore {
+            value["hosted"] = serde_json::json!({
+                "generation_id": hosted.generation_id.as_str(),
+                "created_at": hosted.created_at.to_rfc3339(),
+                "size_bytes": hosted.size_bytes,
+                "content_sha256": hosted.content_sha256.as_str(),
+            });
+        }
+        println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         println!("restored: true");
+        println!("restore_source: {restore_source}");
         println!("peer_id: {}", payload.peer_id);
         println!("device_id: {}", device.device_id.as_str());
+        if let Some(hosted) = &hosted_restore {
+            println!("hosted_generation_id: {}", hosted.generation_id);
+        }
     }
     Ok(())
 }
@@ -729,6 +830,10 @@ fn backup_status(state: &LocalStateDir, json: bool) -> Result<()> {
             Some(timestamp) => println!("last_local_backup_at: {timestamp}"),
             None => println!("last_local_backup_at: never"),
         }
+        match metadata.last_hosted_generation_id.as_deref() {
+            Some(generation_id) => println!("last_hosted_generation_id: {generation_id}"),
+            None => println!("last_hosted_generation_id: never"),
+        }
         match metadata.last_restore_at {
             Some(timestamp) => println!("last_restore_at: {timestamp}"),
             None => println!("last_restore_at: never"),
@@ -744,6 +849,50 @@ fn recovery_phrase_from_args(value: Option<&str>) -> Result<String> {
         .ok_or_else(|| {
             anyhow!("missing recovery phrase; set AICHAN_RECOVERY_PHRASE or pass --recovery-phrase")
         })
+}
+
+fn upload_hosted_backup(
+    base_url: &str,
+    locator: &HostedBackupLocator,
+    backup: &BackupFile,
+) -> Result<HostedBackupUploadResponse> {
+    let path = format!("/v1/backups/{}", locator.backup_lookup_id);
+    let body = serde_json::to_vec(backup)?;
+    let headers = [
+        ("Content-Type", "application/json"),
+        ("Aichan-Backup-Auth", locator.backup_auth_token.as_str()),
+    ];
+    let response = relay_request("PUT", base_url, &path, &headers, &body)?;
+    if response.status >= 400 {
+        return Err(anyhow!(
+            "relay returned HTTP {} while uploading hosted backup: {}",
+            response.status,
+            response.body_text()
+        ));
+    }
+    serde_json::from_slice(&response.body).context("parse hosted backup upload response")
+}
+
+fn download_hosted_backup(
+    base_url: &str,
+    locator: &HostedBackupLocator,
+) -> Result<HostedBackupDownloadResponse> {
+    let path = format!("/v1/backups/{}", locator.backup_lookup_id);
+    let headers = [("Aichan-Backup-Auth", locator.backup_auth_token.as_str())];
+    let response = relay_request("GET", base_url, &path, &headers, &[])?;
+    if response.status == 404 {
+        return Err(anyhow!(
+            "hosted backup not found for the derived recovery phrase lookup"
+        ));
+    }
+    if response.status >= 400 {
+        return Err(anyhow!(
+            "relay returned HTTP {} while downloading hosted backup: {}",
+            response.status,
+            response.body_text()
+        ));
+    }
+    serde_json::from_slice(&response.body).context("parse hosted backup download response")
 }
 
 fn default_backup_path() -> PathBuf {

@@ -85,7 +85,9 @@ aichan send <peer-id> "hello"
 aichan inbox
 aichan publish-delete <publish-id>
 aichan backup create
+aichan backup create --upload
 aichan backup restore --file backup.aichan-backup
+aichan backup restore
 aichan backup status
 ```
 
@@ -93,7 +95,6 @@ Planned commands may appear in newer CLI versions:
 
 ```bash
 aichan sync
-aichan backup create --upload
 ```
 
 Server admin moderation endpoints are operator-only and require Google-issued ID tokens. Planned CLI wrappers may appear in newer CLI versions:

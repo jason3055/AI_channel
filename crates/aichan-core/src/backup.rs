@@ -20,6 +20,9 @@ use crate::state::LocalStateDir;
 pub const BACKUP_ENCRYPTION_SUITE: &str = "aichan.backup.chacha20poly1305.hkdf-sha256.v1";
 const BACKUP_KDF: &str = "hkdf-sha256";
 const RECOVERY_PHRASE_PREFIX: &str = "aichan-rp-";
+const HOSTED_BACKUP_DERIVATION_SALT: &[u8] = b"aichan.backup.v1";
+const HOSTED_BACKUP_LOOKUP_INFO: &[u8] = b"aichan.backup.v1.lookup_id";
+const HOSTED_BACKUP_AUTH_INFO: &[u8] = b"aichan.backup.v1.auth_token";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackupFile {
@@ -48,6 +51,12 @@ pub struct BackupPayload {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedBackupLocator {
+    pub backup_lookup_id: String,
+    pub backup_auth_token: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackupMetadata {
     pub version: u8,
@@ -55,6 +64,12 @@ pub struct BackupMetadata {
     pub last_local_backup_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_local_backup_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_lookup_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_hosted_backup_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_hosted_generation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_restore_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -69,6 +84,9 @@ impl Default for BackupMetadata {
             version: 1,
             last_local_backup_at: None,
             last_local_backup_path: None,
+            backup_lookup_id: None,
+            last_hosted_backup_at: None,
+            last_hosted_generation_id: None,
             last_restore_at: None,
             last_restore_source: None,
             last_restored_peer_id: None,
@@ -131,6 +149,25 @@ pub fn generate_recovery_phrase() -> String {
     let mut bytes = [0_u8; 24];
     OsRng.fill_bytes(&mut bytes);
     format!("{RECOVERY_PHRASE_PREFIX}{}", URL_SAFE_NO_PAD.encode(bytes))
+}
+
+pub fn derive_hosted_backup_locator(recovery_phrase: &str) -> Result<HostedBackupLocator> {
+    validate_recovery_phrase(recovery_phrase)?;
+    let hk = Hkdf::<Sha256>::new(
+        Some(HOSTED_BACKUP_DERIVATION_SALT),
+        recovery_phrase.as_bytes(),
+    );
+    let mut lookup_bytes = [0_u8; 24];
+    let mut auth_bytes = [0_u8; 32];
+    hk.expand(HOSTED_BACKUP_LOOKUP_INFO, &mut lookup_bytes)
+        .map_err(|_| AichanError::InvalidProtocol("backup lookup derivation failed".to_string()))?;
+    hk.expand(HOSTED_BACKUP_AUTH_INFO, &mut auth_bytes)
+        .map_err(|_| AichanError::InvalidProtocol("backup auth derivation failed".to_string()))?;
+
+    Ok(HostedBackupLocator {
+        backup_lookup_id: format!("bak_{}", URL_SAFE_NO_PAD.encode(lookup_bytes)),
+        backup_auth_token: format!("auth_{}", URL_SAFE_NO_PAD.encode(auth_bytes)),
+    })
 }
 
 pub fn encrypt_backup(payload: &BackupPayload, recovery_phrase: &str) -> Result<BackupFile> {
@@ -222,16 +259,21 @@ impl BackupFile {
 }
 
 fn derive_backup_key(recovery_phrase: &str, salt: &[u8; 16]) -> Result<[u8; 32]> {
-    if !recovery_phrase.starts_with(RECOVERY_PHRASE_PREFIX) {
-        return Err(AichanError::InvalidProtocol(
-            "recovery phrase has invalid format".to_string(),
-        ));
-    }
+    validate_recovery_phrase(recovery_phrase)?;
     let hk = Hkdf::<Sha256>::new(Some(salt), recovery_phrase.as_bytes());
     let mut key = [0_u8; 32];
     hk.expand(b"aichan backup encryption v1", &mut key)
         .map_err(|_| AichanError::InvalidProtocol("backup key derivation failed".to_string()))?;
     Ok(key)
+}
+
+fn validate_recovery_phrase(recovery_phrase: &str) -> Result<()> {
+    if !recovery_phrase.starts_with(RECOVERY_PHRASE_PREFIX) {
+        return Err(AichanError::InvalidProtocol(
+            "recovery phrase has invalid format".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn decode_base64url_array<const N: usize>(encoded: &str, field: &str) -> Result<[u8; N]> {
