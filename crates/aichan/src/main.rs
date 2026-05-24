@@ -1,6 +1,6 @@
-use std::cmp::Ordering;
-use std::fs;
-use std::io::Write;
+use std::io::Read;
+use std::sync::Mutex;
+use std::{cmp::Ordering, fs, io::Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::sync::OnceLock;
@@ -25,7 +25,6 @@ use aichan_core::{
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
-use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -33,7 +32,6 @@ use uuid::Uuid;
 const PROJECT_REPO_URL: &str = "https://github.com/aftershower/AI_channel";
 const PROJECT_REPO_SLUG: &str = "aftershower/AI_channel";
 const GITHUB_API_BASE_URL: &str = "https://api.github.com";
-const DEFAULT_RELAY_CONNECT_TIMEOUT_SECS: u64 = 12;
 const DEFAULT_RELAY_REQUEST_TIMEOUT_SECS: u64 = 30;
 const MIN_RELAY_TIMEOUT_SECS: u64 = 1;
 const MAX_RELAY_TIMEOUT_SECS: u64 = 120;
@@ -49,6 +47,10 @@ struct Cli {
     /// Emit machine-readable JSON when supported.
     #[arg(long, global = true)]
     json: bool,
+
+    /// HTTP request timeout in seconds (1-120, default 30).
+    #[arg(long = "timeout", global = true, value_name = "SECS")]
+    timeout_seconds: Option<u64>,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -288,6 +290,7 @@ fn main() -> Result<()> {
     let Cli {
         project_dir,
         json,
+        timeout_seconds,
         command,
     } = cli;
     let command = command.unwrap_or(Command::Identity);
@@ -295,6 +298,13 @@ fn main() -> Result<()> {
         Command::InitAgentHints => project_state_dir(project_dir)?,
         _ => default_state_dir(project_dir)?,
     };
+
+    let timeout_secs = timeout_seconds
+        .unwrap_or(DEFAULT_RELAY_REQUEST_TIMEOUT_SECS)
+        .clamp(MIN_RELAY_TIMEOUT_SECS, MAX_RELAY_TIMEOUT_SECS);
+
+    init_state_cache(&state);
+    init_http_timeouts(timeout_secs);
 
     match command {
         Command::Identity => print_identity(&state, json),
@@ -354,8 +364,88 @@ fn user_home_dir() -> Result<PathBuf> {
     ))
 }
 
+// P2: Per-command state cache to avoid repeated file I/O.
+static STATE_CACHE: OnceLock<Mutex<CachedState>> = OnceLock::new();
+
+struct CachedState {
+    identity: Option<IdentityFile>,
+    device: Option<DeviceFile>,
+    memory: Option<MemoryFile>,
+    config: Option<AichanConfig>,
+    state_root: PathBuf,
+}
+
+fn cache_key(state: &LocalStateDir) -> PathBuf {
+    state.root()
+}
+
+fn init_state_cache(state: &LocalStateDir) {
+    let _ = STATE_CACHE.set(Mutex::new(CachedState {
+        identity: None,
+        device: None,
+        memory: None,
+        config: None,
+        state_root: cache_key(state),
+    }));
+}
+
+fn cached_identity(state: &LocalStateDir) -> Result<IdentityFile> {
+    let cache = STATE_CACHE.get().expect("state cache not initialized");
+    let mut cached = cache.lock().expect("state cache mutex poisoned");
+    if cached.state_root != cache_key(state) || cached.identity.is_none() {
+        cached.identity = Some(aichan_core::IdentityFile::create_or_load(state)?);
+    }
+    cached.identity.clone().ok_or_else(|| anyhow!("failed to load identity"))
+}
+
+fn cached_device(state: &LocalStateDir) -> Result<DeviceFile> {
+    let cache = STATE_CACHE.get().expect("state cache not initialized");
+    let mut cached = cache.lock().expect("state cache mutex poisoned");
+    if cached.state_root != cache_key(state) || cached.device.is_none() {
+        cached.device = Some(aichan_core::DeviceFile::create_or_load(state)?);
+    }
+    cached.device.clone().ok_or_else(|| anyhow!("failed to load device"))
+}
+
+fn cached_memory(state: &LocalStateDir) -> Result<MemoryFile> {
+    let cache = STATE_CACHE.get().expect("state cache not initialized");
+    let mut cached = cache.lock().expect("state cache mutex poisoned");
+    if cached.state_root != cache_key(state) || cached.memory.is_none() {
+        cached.memory = Some(aichan_core::MemoryFile::create_or_load(state)?);
+    }
+    cached.memory.clone().ok_or_else(|| anyhow!("failed to load memory"))
+}
+
+fn cached_config(state: &LocalStateDir) -> Result<AichanConfig> {
+    let cache = STATE_CACHE.get().expect("state cache not initialized");
+    let mut cached = cache.lock().expect("state cache mutex poisoned");
+    if cached.state_root != cache_key(state) || cached.config.is_none() {
+        cached.config = Some(aichan_core::AichanConfig::load_or_default(state)?);
+    }
+    cached.config.clone().ok_or_else(|| anyhow!("failed to load config"))
+}
+
+fn mutable_memory(state: &LocalStateDir) -> Result<MemoryFile> {
+    let cache = STATE_CACHE.get().expect("state cache not initialized");
+    let mut cached = cache.lock().expect("state cache mutex poisoned");
+    if cached.state_root != cache_key(state) || cached.memory.is_none() {
+        cached.memory = Some(aichan_core::MemoryFile::create_or_load(state)?);
+    }
+    cached.memory.clone().ok_or_else(|| anyhow!("failed to load memory"))
+}
+
+fn update_memory_in_cache(state: &LocalStateDir, memory: &MemoryFile) {
+    if let Some(cache) = STATE_CACHE.get() {
+        if let Ok(mut cached) = cache.lock() {
+            if cached.state_root == cache_key(state) {
+                cached.memory = Some(memory.clone());
+            }
+        }
+    }
+}
+
 fn print_identity(state: &LocalStateDir, json: bool) -> Result<()> {
-    let identity = IdentityFile::create_or_load(state)?;
+    let identity = cached_identity(state)?;
     if json {
         let value = serde_json::json!({
             "version": identity.version,
@@ -376,9 +466,9 @@ fn print_identity(state: &LocalStateDir, json: bool) -> Result<()> {
 }
 
 fn init_agent_hints(state: &LocalStateDir) -> Result<()> {
-    IdentityFile::create_or_load(state)?;
-    DeviceFile::create_or_load(state)?;
-    MemoryFile::create_or_load(state)?;
+    cached_identity(state)?;
+    cached_device(state)?;
+    cached_memory(state)?;
 
     let project_root = state
         .root()
@@ -472,10 +562,10 @@ fn write_marked_block(path: &Path, body: &str) -> Result<()> {
 }
 
 fn print_status(state: &LocalStateDir, json: bool) -> Result<()> {
-    let identity = IdentityFile::create_or_load(state)?;
-    let device = DeviceFile::create_or_load(state)?;
-    let memory = MemoryFile::create_or_load(state)?;
-    let config = AichanConfig::load_or_default(state)?;
+    let identity = cached_identity(state)?;
+    let device = cached_device(state)?;
+    let memory = cached_memory(state)?;
+    let config = cached_config(state)?;
 
     if json {
         let sync_warning = sync_window_warning(memory.sync.last_sync_at, Utc::now());
@@ -830,19 +920,32 @@ fn latest_release_api_url() -> String {
 }
 
 fn github_get_bytes(url: &str, description: &str) -> Result<Vec<u8>> {
-    let response = relay_http_client()?
+    let agent = relay_http_agent()?;
+    let result = agent
         .get(url)
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .with_context(|| format!("{description}: {url}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(anyhow!("{description} returned HTTP {status}"));
+        .set("Accept", "application/vnd.github+json")
+        .call();
+    match result {
+        Ok(response) => {
+            let mut body = Vec::new();
+            response
+                .into_reader()
+                .read_to_end(&mut body)
+                .with_context(|| format!("read {description}: {url}"))?;
+            Ok(body)
+        }
+        Err(ureq::Error::Status(status, response)) => {
+            let mut err_body = Vec::new();
+            let _ = response.into_reader().read_to_end(&mut err_body);
+            let detail = String::from_utf8_lossy(&err_body).chars().take(200).collect::<String>();
+            Err(anyhow!(
+                "{description} returned HTTP {status}: {detail}"
+            ))
+        }
+        Err(ureq::Error::Transport(transport)) => {
+            Err(anyhow::Error::from(transport).context(format!("{description}: {url}")))
+        }
     }
-    Ok(response
-        .bytes()
-        .with_context(|| format!("read {description}: {url}"))?
-        .to_vec())
 }
 
 fn current_platform_release_asset_name(version: &str) -> Option<String> {
@@ -1026,7 +1129,7 @@ fn publish(state: &LocalStateDir, args: PublishArgs, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    let config = AichanConfig::load_or_default(state)?;
+    let config = cached_config(state)?;
     let base_url = config.effective_base_url(args.base_url.as_deref());
     let body = serde_json::to_vec(&signed)?;
     let response = relay_request(
@@ -1040,7 +1143,7 @@ fn publish(state: &LocalStateDir, args: PublishArgs, json: bool) -> Result<()> {
 }
 
 fn publish_search(state: &LocalStateDir, args: PublishSearchArgs, json: bool) -> Result<()> {
-    let config = AichanConfig::load_or_default(state)?;
+    let config = cached_config(state)?;
     let base_url = config.effective_base_url(args.base_url.as_deref());
     let mut path = format!("/v1/publish/search?limit={}", args.limit);
     if let Some(tag) = args.tag {
@@ -1052,7 +1155,7 @@ fn publish_search(state: &LocalStateDir, args: PublishSearchArgs, json: bool) ->
 }
 
 fn discover(state: &LocalStateDir, args: DiscoverArgs, json: bool) -> Result<()> {
-    let config = AichanConfig::load_or_default(state)?;
+    let config = cached_config(state)?;
     let base_url = config.effective_base_url(args.base_url.as_deref());
     let path = discover_path(&args.tags, args.limit, args.seed.as_deref());
     let response = relay_request("GET", base_url, &path, &[], &[])?;
@@ -1060,9 +1163,9 @@ fn discover(state: &LocalStateDir, args: DiscoverArgs, json: bool) -> Result<()>
 }
 
 fn publish_delete(state: &LocalStateDir, args: PublishDeleteArgs, json: bool) -> Result<()> {
-    let identity = IdentityFile::create_or_load(state)?;
+    let identity = cached_identity(state)?;
     let signing_key = identity.signing_key()?;
-    let config = AichanConfig::load_or_default(state)?;
+    let config = cached_config(state)?;
     let base_url = config.effective_base_url(args.base_url.as_deref());
     let path = format!("/v1/publish/{}", args.publish_id);
     let request = RequestToSign {
@@ -1107,7 +1210,7 @@ fn send_message(state: &LocalStateDir, args: SendArgs, json: bool) -> Result<()>
             if let Some((key_id, public_key)) = cached_recipient_message_key(state, &recipient)? {
                 (key_id, public_key, "cache")
             } else {
-                let config = AichanConfig::load_or_default(state)?;
+                let config = cached_config(state)?;
                 let base_url = config.effective_base_url(args.base_url.as_deref());
                 let (key_id, public_key) = discover_recipient_message_key(base_url, &recipient)?;
                 cache_recipient_message_key(state, &recipient, &key_id, &public_key)?;
@@ -1138,7 +1241,7 @@ fn send_message(state: &LocalStateDir, args: SendArgs, json: bool) -> Result<()>
         return Ok(());
     }
 
-    let config = AichanConfig::load_or_default(state)?;
+    let config = cached_config(state)?;
     let base_url = config.effective_base_url(args.base_url.as_deref());
     let body = serde_json::to_vec(&signed)?;
     let post_started = Instant::now();
@@ -1161,10 +1264,10 @@ fn send_message(state: &LocalStateDir, args: SendArgs, json: bool) -> Result<()>
 }
 
 fn inbox(state: &LocalStateDir, args: InboxArgs, json: bool) -> Result<()> {
-    let identity = IdentityFile::create_or_load(state)?;
+    let identity = cached_identity(state)?;
     let message_keys = identity.message_key_pair()?;
     let signing_key = identity.signing_key()?;
-    let config = AichanConfig::load_or_default(state)?;
+    let config = cached_config(state)?;
     let base_url = config.effective_base_url(args.base_url.as_deref());
     let path = format!("/v1/inbox?limit={}", args.limit.clamp(1, 100));
     let request = RequestToSign {
@@ -1284,10 +1387,10 @@ struct ActivityListResponse {
 }
 
 fn sync_activity(state: &LocalStateDir, args: SyncArgs, json: bool) -> Result<()> {
-    let identity = IdentityFile::create_or_load(state)?;
-    let device = DeviceFile::create_or_load(state)?;
-    let mut memory = MemoryFile::create_or_load(state)?;
-    let config = AichanConfig::load_or_default(state)?;
+    let identity = cached_identity(state)?;
+    let device = cached_device(state)?;
+    let mut memory = mutable_memory(state)?;
+    let config = cached_config(state)?;
     let base_url = config.effective_base_url(args.base_url.as_deref());
     let locator = derive_activity_locator(&identity)?;
     let warning_before = sync_window_warning(memory.sync.last_sync_at, Utc::now());
@@ -1320,6 +1423,7 @@ fn sync_activity(state: &LocalStateDir, args: SyncArgs, json: bool) -> Result<()
     memory.sync.last_sync_at = Some(synced_at);
     memory.sync.activity_cursor = page.next_cursor.clone();
     memory.write_to(state.memory_path())?;
+    update_memory_in_cache(state, &memory);
 
     if json {
         println!(
@@ -1529,10 +1633,10 @@ struct HostedBackupDownloadResponse {
 }
 
 fn backup_create(state: &LocalStateDir, args: BackupCreateArgs, json: bool) -> Result<()> {
-    let identity = IdentityFile::create_or_load(state)?;
-    let device = DeviceFile::create_or_load(state)?;
-    let memory = MemoryFile::create_or_load(state)?;
-    let config = AichanConfig::load_or_default(state)?;
+    let identity = cached_identity(state)?;
+    let device = cached_device(state)?;
+    let memory = cached_memory(state)?;
+    let config = cached_config(state)?;
     let hosted_base_url = args.upload.then(|| {
         config
             .effective_base_url(args.base_url.as_deref())
@@ -1639,7 +1743,7 @@ fn backup_restore(state: &LocalStateDir, args: BackupRestoreArgs, json: bool) ->
         ));
     }
     let recovery_phrase = recovery_phrase_from_args(args.recovery_phrase.as_deref())?;
-    let config = AichanConfig::load_or_default(state)?;
+    let config = cached_config(state)?;
     let mut local_backup_file = None;
     let mut hosted_lookup_id = None;
     let mut hosted_restore = None;
@@ -1856,7 +1960,7 @@ fn build_message_envelope(
     recipient_key_id: String,
     recipient_public_key: String,
 ) -> Result<SignedProtocolObject<MessageEnvelopePayload>> {
-    let identity = IdentityFile::create_or_load(state)?;
+    let identity = aichan_core::IdentityFile::create_or_load(state)?;
     let signing_key = identity.signing_key()?;
     let now = Utc::now();
     let message_id = format!("msg_{}", Uuid::new_v4().simple());
@@ -2029,7 +2133,7 @@ fn build_publish_record(
     body: String,
     tags: Vec<String>,
 ) -> Result<SignedProtocolObject<PublishRecordPayload>> {
-    let identity = IdentityFile::create_or_load(state)?;
+    let identity = aichan_core::IdentityFile::create_or_load(state)?;
     let message_keys = identity.message_key_pair()?;
     let signing_key = identity.signing_key()?;
     let now = Utc::now();
@@ -2104,6 +2208,38 @@ impl RelayResponse {
     }
 }
 
+static RELAY_HTTP_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+
+static HTTP_TIMEOUT_SECS: OnceLock<u64> = OnceLock::new();
+
+fn init_http_timeouts(timeout_secs: u64) {
+    let _ = HTTP_TIMEOUT_SECS.set(timeout_secs);
+}
+
+fn effective_http_timeout() -> u64 {
+    HTTP_TIMEOUT_SECS
+        .get()
+        .copied()
+        .unwrap_or(DEFAULT_RELAY_REQUEST_TIMEOUT_SECS)
+}
+
+fn relay_http_agent() -> Result<&'static ureq::Agent> {
+    if let Some(agent) = RELAY_HTTP_AGENT.get() {
+        return Ok(agent);
+    }
+    let timeout = Duration::from_secs(effective_http_timeout());
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(timeout)
+        .timeout_read(timeout)
+        .timeout_write(timeout)
+        .user_agent(&format!("aichan/{}", env!("CARGO_PKG_VERSION")))
+        .build();
+    let _ = RELAY_HTTP_AGENT.set(agent);
+    Ok(RELAY_HTTP_AGENT
+        .get()
+        .expect("relay HTTP agent was just initialized"))
+}
+
 fn relay_request(
     method: &str,
     base_url: &str,
@@ -2113,29 +2249,25 @@ fn relay_request(
 ) -> Result<RelayResponse> {
     let started = Instant::now();
     let url = format!("{}{}", base_url.trim_end_matches('/'), path);
-    let client = relay_http_client()?;
-    let method = reqwest::Method::from_bytes(method.as_bytes())?;
-    let mut request = client.request(method.clone(), &url);
-    for (name, value) in headers {
-        request = request.header(*name, *value);
-    }
-    if !body.is_empty() || matches!(method, reqwest::Method::POST | reqwest::Method::PUT) {
-        request = request.body(body.to_vec());
-    }
+    let agent = relay_http_agent()?;
 
-    let response = request.send().map_err(|source| {
-        relay_send_error(source, method.as_str(), &url, path, started.elapsed())
+    let started_send = Instant::now();
+    let (status, response_body) = match method {
+        "GET" => do_ureq_call(agent.get(&url), headers, body, &url, method),
+        "POST" => do_ureq_call(agent.post(&url), headers, body, &url, method),
+        "PUT" => do_ureq_call(agent.put(&url), headers, body, &url, method),
+        "DELETE" => do_ureq_call(agent.delete(&url), headers, body, &url, method),
+        other => return Err(anyhow!("unsupported HTTP method: {other}")),
+    }
+    .map_err(|source| {
+        relay_send_error(source, method, &url, path, started_send.elapsed())
     })?;
-    let status = response.status().as_u16();
-    let response_body = response
-        .bytes()
-        .with_context(|| format!("read response {} {}", method.as_str(), url))?
-        .to_vec();
+
     trace_timing(
         "http.request",
         started,
         &[
-            ("method", method.as_str()),
+            ("method", method),
             ("path", path),
             ("status", &status.to_string()),
             ("bytes", &response_body.len().to_string()),
@@ -2148,59 +2280,47 @@ fn relay_request(
     })
 }
 
-static RELAY_HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RelayHttpTimeouts {
-    connect_timeout: Duration,
-    request_timeout: Duration,
-}
-
-fn default_relay_http_timeouts() -> RelayHttpTimeouts {
-    relay_http_timeouts_from_env(|name| std::env::var(name).ok())
-}
-
-fn relay_http_timeouts_from_env(read_env: impl Fn(&str) -> Option<String>) -> RelayHttpTimeouts {
-    RelayHttpTimeouts {
-        connect_timeout: timeout_from_env(
-            read_env("AICHAN_HTTP_CONNECT_TIMEOUT_SECS"),
-            DEFAULT_RELAY_CONNECT_TIMEOUT_SECS,
-        ),
-        request_timeout: timeout_from_env(
-            read_env("AICHAN_HTTP_TIMEOUT_SECS"),
-            DEFAULT_RELAY_REQUEST_TIMEOUT_SECS,
-        ),
+fn do_ureq_call(
+    request: ureq::Request,
+    headers: &[(&str, &str)],
+    body: &[u8],
+    url: &str,
+    method: &str,
+) -> Result<(u16, Vec<u8>)> {
+    let mut request = request;
+    for (name, value) in headers {
+        request = request.set(*name, value);
     }
-}
-
-fn timeout_from_env(value: Option<String>, default_secs: u64) -> Duration {
-    let secs = value
-        .as_deref()
-        .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .unwrap_or(default_secs)
-        .clamp(MIN_RELAY_TIMEOUT_SECS, MAX_RELAY_TIMEOUT_SECS);
-    Duration::from_secs(secs)
-}
-
-fn relay_http_client() -> Result<&'static Client> {
-    if let Some(client) = RELAY_HTTP_CLIENT.get() {
-        return Ok(client);
+    let result = if !body.is_empty() || matches!(method, "POST" | "PUT") {
+        request.send_bytes(body)
+    } else {
+        request.call()
+    };
+    match result {
+        Ok(response) => {
+            let status = response.status();
+            let mut body_bytes = Vec::new();
+            response
+                .into_reader()
+                .read_to_end(&mut body_bytes)
+                .with_context(|| format!("read response body {method} {url}"))?;
+            Ok((status, body_bytes))
+        }
+        Err(ureq::Error::Status(status, response)) => {
+            let mut body_bytes = Vec::new();
+            response
+                .into_reader()
+                .read_to_end(&mut body_bytes)
+                .with_context(|| format!("read error response body {method} {url}"))?;
+            Ok((status, body_bytes))
+        }
+        Err(ureq::Error::Transport(transport)) => Err(anyhow::Error::from(transport)
+            .context(format!("{method} {url}"))),
     }
-    let timeouts = default_relay_http_timeouts();
-    let client = Client::builder()
-        .connect_timeout(timeouts.connect_timeout)
-        .timeout(timeouts.request_timeout)
-        .user_agent(concat!("aichan/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .context("build relay HTTP client")?;
-    let _ = RELAY_HTTP_CLIENT.set(client);
-    Ok(RELAY_HTTP_CLIENT
-        .get()
-        .expect("relay HTTP client was just initialized"))
 }
 
 fn relay_send_error(
-    source: reqwest::Error,
+    source: anyhow::Error,
     method: &str,
     url: &str,
     path: &str,
@@ -2208,7 +2328,9 @@ fn relay_send_error(
 ) -> anyhow::Error {
     let elapsed_ms = elapsed.as_millis();
     let mut message = format!("request {method} {url} failed after {elapsed_ms}ms");
-    if source.is_timeout() || source.is_connect() {
+    if source.to_string().contains("timeout")
+        || source.to_string().contains("TimedOut")
+    {
         message
             .push_str("; connection or TLS handshake timed out before the relay handler responded");
         if path == "/v1/publish/search?limit=100" {
@@ -2217,10 +2339,10 @@ fn relay_send_error(
             );
         }
         message.push_str(
-            "; retry once, set AICHAN_TRACE_HTTP=1 for timings, or increase AICHAN_HTTP_CONNECT_TIMEOUT_SECS on slow networks",
+            "; retry once, set AICHAN_TRACE_HTTP=1 for timings, or increase --timeout on slow networks",
         );
     }
-    anyhow!(source).context(message)
+    source.context(message)
 }
 
 fn trace_timing(name: &str, started: Instant, fields: &[(&str, &str)]) {
@@ -2293,11 +2415,10 @@ mod tests {
     }
 
     #[test]
-    fn default_relay_http_timeouts_allow_slow_cloud_run_tls_handshake() {
-        let timeouts = default_relay_http_timeouts();
-
-        assert!(timeouts.connect_timeout >= Duration::from_secs(10));
-        assert!(timeouts.request_timeout >= Duration::from_secs(20));
+    fn default_http_timeout_is_reasonable() {
+        let default = DEFAULT_RELAY_REQUEST_TIMEOUT_SECS;
+        assert!(default >= 20);
+        assert!(default <= 120);
     }
 
     #[test]
