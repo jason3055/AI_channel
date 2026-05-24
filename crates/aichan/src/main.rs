@@ -1,10 +1,10 @@
 use std::io::Read;
-use std::sync::Mutex;
-use std::{cmp::Ordering, fs, io::Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command as ProcessCommand;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+use std::{cmp::Ordering, fs, io::Write};
 
 use aichan_core::protocol::MessageEncryptionKey;
 use aichan_core::protocol::{
@@ -395,7 +395,10 @@ fn cached_identity(state: &LocalStateDir) -> Result<IdentityFile> {
     if cached.state_root != cache_key(state) || cached.identity.is_none() {
         cached.identity = Some(aichan_core::IdentityFile::create_or_load(state)?);
     }
-    cached.identity.clone().ok_or_else(|| anyhow!("failed to load identity"))
+    cached
+        .identity
+        .clone()
+        .ok_or_else(|| anyhow!("failed to load identity"))
 }
 
 fn cached_device(state: &LocalStateDir) -> Result<DeviceFile> {
@@ -404,7 +407,10 @@ fn cached_device(state: &LocalStateDir) -> Result<DeviceFile> {
     if cached.state_root != cache_key(state) || cached.device.is_none() {
         cached.device = Some(aichan_core::DeviceFile::create_or_load(state)?);
     }
-    cached.device.clone().ok_or_else(|| anyhow!("failed to load device"))
+    cached
+        .device
+        .clone()
+        .ok_or_else(|| anyhow!("failed to load device"))
 }
 
 fn cached_memory(state: &LocalStateDir) -> Result<MemoryFile> {
@@ -413,7 +419,10 @@ fn cached_memory(state: &LocalStateDir) -> Result<MemoryFile> {
     if cached.state_root != cache_key(state) || cached.memory.is_none() {
         cached.memory = Some(aichan_core::MemoryFile::create_or_load(state)?);
     }
-    cached.memory.clone().ok_or_else(|| anyhow!("failed to load memory"))
+    cached
+        .memory
+        .clone()
+        .ok_or_else(|| anyhow!("failed to load memory"))
 }
 
 fn cached_config(state: &LocalStateDir) -> Result<AichanConfig> {
@@ -422,7 +431,10 @@ fn cached_config(state: &LocalStateDir) -> Result<AichanConfig> {
     if cached.state_root != cache_key(state) || cached.config.is_none() {
         cached.config = Some(aichan_core::AichanConfig::load_or_default(state)?);
     }
-    cached.config.clone().ok_or_else(|| anyhow!("failed to load config"))
+    cached
+        .config
+        .clone()
+        .ok_or_else(|| anyhow!("failed to load config"))
 }
 
 fn mutable_memory(state: &LocalStateDir) -> Result<MemoryFile> {
@@ -431,7 +443,10 @@ fn mutable_memory(state: &LocalStateDir) -> Result<MemoryFile> {
     if cached.state_root != cache_key(state) || cached.memory.is_none() {
         cached.memory = Some(aichan_core::MemoryFile::create_or_load(state)?);
     }
-    cached.memory.clone().ok_or_else(|| anyhow!("failed to load memory"))
+    cached
+        .memory
+        .clone()
+        .ok_or_else(|| anyhow!("failed to load memory"))
 }
 
 fn update_memory_in_cache(state: &LocalStateDir, memory: &MemoryFile) {
@@ -937,10 +952,11 @@ fn github_get_bytes(url: &str, description: &str) -> Result<Vec<u8>> {
         Err(ureq::Error::Status(status, response)) => {
             let mut err_body = Vec::new();
             let _ = response.into_reader().read_to_end(&mut err_body);
-            let detail = String::from_utf8_lossy(&err_body).chars().take(200).collect::<String>();
-            Err(anyhow!(
-                "{description} returned HTTP {status}: {detail}"
-            ))
+            let detail = String::from_utf8_lossy(&err_body)
+                .chars()
+                .take(200)
+                .collect::<String>();
+            Err(anyhow!("{description} returned HTTP {status}: {detail}"))
         }
         Err(ureq::Error::Transport(transport)) => {
             Err(anyhow::Error::from(transport).context(format!("{description}: {url}")))
@@ -2259,9 +2275,7 @@ fn relay_request(
         "DELETE" => do_ureq_call(agent.delete(&url), headers, body, &url, method),
         other => return Err(anyhow!("unsupported HTTP method: {other}")),
     }
-    .map_err(|source| {
-        relay_send_error(source, method, &url, path, started_send.elapsed())
-    })?;
+    .map_err(|source| relay_send_error(source, method, &url, path, started_send.elapsed()))?;
 
     trace_timing(
         "http.request",
@@ -2314,8 +2328,9 @@ fn do_ureq_call(
                 .with_context(|| format!("read error response body {method} {url}"))?;
             Ok((status, body_bytes))
         }
-        Err(ureq::Error::Transport(transport)) => Err(anyhow::Error::from(transport)
-            .context(format!("{method} {url}"))),
+        Err(ureq::Error::Transport(transport)) => {
+            Err(anyhow::Error::from(transport).context(format!("{method} {url}")))
+        }
     }
 }
 
@@ -2328,9 +2343,7 @@ fn relay_send_error(
 ) -> anyhow::Error {
     let elapsed_ms = elapsed.as_millis();
     let mut message = format!("request {method} {url} failed after {elapsed_ms}ms");
-    if source.to_string().contains("timeout")
-        || source.to_string().contains("TimedOut")
-    {
+    if source.to_string().contains("timeout") || source.to_string().contains("TimedOut") {
         message
             .push_str("; connection or TLS handshake timed out before the relay handler responded");
         if path == "/v1/publish/search?limit=100" {
